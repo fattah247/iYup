@@ -1,43 +1,149 @@
 {
-  "title": "iYup Dashboard",
+  "uid": "iyup-overview",
+  "title": "iYup uptime overview",
+  "description": "What is down and why, when it happened, latency, early warnings, and the health of the monitoring pipeline itself.",
+  "tags": [
+    "iyup",
+    "uptime"
+  ],
   "timezone": "browser",
-  "schemaVersion": 36,
-  "version": 2,
-  "refresh": "5s",
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "15s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "links": [],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "iconColor": "#e0603b",
+        "name": "Target down",
+        "titleFormat": "{{target}} down",
+        "expr": "changes(max by (target) (ping_up{target=~\"$target\"})[1m:15s]) > 0 and max by (target) (ping_up{target=~\"$target\"}) == 0",
+        "step": "60s",
+        "textFormat": "State changed to down",
+        "useValueForTime": false
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "includeAll": false,
+        "multi": false,
+        "options": []
+      },
+      {
+        "name": "target",
+        "label": "Target",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(ping_target_info, target)",
+        "query": {
+          "query": "label_values(ping_target_info, target)",
+          "refId": "targets",
+          "qryType": 1
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1,
+        "hide": 0,
+        "regex": "",
+        "options": []
+      }
+    ]
+  },
   "panels": [
     {
-      "type": "stat",
-      "title": "API Requests 5m",
+      "type": "row",
       "id": 1,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(increase(api_gateway_requests_total[5m]))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
+      "title": "Right now",
+      "collapsed": false,
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 3,
-        "h": 4
-      }
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
     },
     {
       "type": "stat",
-      "title": "Google Success 5m",
       "id": 2,
-      "datasource": "Prometheus",
+      "title": "Up",
+      "description": "Targets whose latest check succeeded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
       "targets": [
         {
-          "expr": "sum(increase(ping_success_total{target=\"https://google.com\"}[5m]))",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(max by (target) (ping_up{target=~\"$target\"}) == 1) or vector(0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -50,34 +156,58 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "gray",
+                "color": "text",
                 "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
               }
             ]
-          }
+          },
+          "mappings": []
         },
         "overrides": []
       },
-      "gridPos": {
-        "x": 3,
-        "y": 0,
-        "w": 3,
-        "h": 4
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
       }
     },
     {
       "type": "stat",
-      "title": "GitHub Success 5m",
       "id": 3,
-      "datasource": "Prometheus",
+      "title": "Down",
+      "description": "Targets whose latest check failed, after retries. Lights up when any target is down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
       "targets": [
         {
-          "expr": "sum(increase(ping_success_total{target=\"https://github.com\"}[5m]))",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(max by (target) (ping_up{target=~\"$target\"}) == 0) or vector(0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -90,606 +220,1376 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "gray",
+                "color": "transparent",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#e0603b",
                 "value": 1
               }
             ]
-          }
+          },
+          "mappings": []
         },
         "overrides": []
       },
-      "gridPos": {
-        "x": 6,
-        "y": 0,
-        "w": 3,
-        "h": 4
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
       }
     },
     {
       "type": "stat",
-      "title": "Google Avail 5m",
       "id": 4,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "100 * (sum(increase(ping_success_total{target=\"https://google.com\"}[5m])) or vector(0)) / clamp_min((sum(increase(ping_success_total{target=\"https://google.com\"}[5m])) or vector(0)) + (sum(increase(ping_failure_total{target=\"https://google.com\"}[5m])) or vector(0)), 1)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 95
-              },
-              {
-                "color": "green",
-                "value": 99
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 9,
-        "y": 0,
-        "w": 3,
-        "h": 4
-      }
-    },
-    {
-      "type": "stat",
-      "title": "GitHub Avail 5m",
-      "id": 21,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "100 * (sum(increase(ping_success_total{target=\"https://github.com\"}[5m])) or vector(0)) / clamp_min((sum(increase(ping_success_total{target=\"https://github.com\"}[5m])) or vector(0)) + (sum(increase(ping_failure_total{target=\"https://github.com\"}[5m])) or vector(0)), 1)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 95
-              },
-              {
-                "color": "green",
-                "value": 99
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 4,
-        "w": 3,
-        "h": 4
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Google Fail 5m",
-      "id": 22,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(increase(ping_failure_total{target=\"https://google.com\"}[5m])) or vector(0)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 3,
-        "y": 4,
-        "w": 3,
-        "h": 4
-      }
-    },
-    {
-      "type": "stat",
-      "title": "GitHub Fail 5m",
-      "id": 23,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(increase(ping_failure_total{target=\"https://github.com\"}[5m])) or vector(0)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 4,
-        "w": 3,
-        "h": 4
-      }
-    },
-    {
-      "type": "stat",
-      "title": "API Error 5m",
-      "id": 14,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "100 * (sum(rate(api_gateway_requests_total{status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(api_gateway_requests_total[5m])), 1)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 9,
-        "y": 4,
-        "w": 3,
-        "h": 4
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Requests by Status (rate)",
-      "id": 5,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum by (status) (rate(api_gateway_requests_total[$__rate_interval]))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 8,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "API 5xx Rate (5m)",
-      "id": 13,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(api_gateway_requests_total{status=~\"5..\"}[5m])) or vector(0)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 8,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Ping Success/Failures (rate) - google.com",
-      "id": 6,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "rate(ping_success_total{target=\"https://google.com\"}[$__rate_interval])",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(ping_failure_total{target=\"https://google.com\"}[$__rate_interval]) or vector(0)",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 14,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Ping Success/Failures (rate) - github.com",
-      "id": 24,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "rate(ping_success_total{target=\"https://github.com\"}[$__rate_interval])",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(ping_failure_total{target=\"https://github.com\"}[$__rate_interval]) or vector(0)",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 14,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "bargauge",
-      "title": "Requests by Path (5m)",
-      "id": 7,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum by (path) (increase(api_gateway_requests_total[5m]))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 20,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "heatmap",
-      "title": "API Latency Histogram (bucket rate)",
-      "id": 8,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(api_gateway_request_duration_seconds_bucket[5m])) by (le)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 20,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "heatmap",
-      "title": "Ping Latency Histogram (1m rate) - google.com",
-      "id": 9,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(ping_latency_seconds_bucket{target=\"https://google.com\"}[1m])) by (le)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 26,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "heatmap",
-      "title": "Ping Latency Histogram (1m rate) - github.com",
-      "id": 25,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(ping_latency_seconds_bucket{target=\"https://github.com\"}[1m])) by (le)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 26,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Average Ping Latency (s) - google.com",
-      "id": 10,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(ping_latency_seconds_sum{target=\"https://google.com\"}[$__rate_interval])) / clamp_min(sum(rate(ping_latency_seconds_count{target=\"https://google.com\"}[$__rate_interval])), 1)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 32,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Average Ping Latency (s) - github.com",
-      "id": 26,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(rate(ping_latency_seconds_sum{target=\"https://github.com\"}[$__rate_interval])) / clamp_min(sum(rate(ping_latency_seconds_count{target=\"https://github.com\"}[$__rate_interval])), 1)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 32,
-        "w": 6,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "API Request Count (rate by path)",
-      "id": 11,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum by (path) (rate(api_gateway_requests_total[$__rate_interval]))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 38,
-        "w": 8,
-        "h": 6
-      }
-    },
-    {
-      "type": "stat",
-      "title": "Alerts Firing",
-      "id": 15,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "sum(ALERTS{alertstate=\"firing\"}) or vector(0)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
+      "title": "Stale",
+      "description": "Targets whose last check is older than the agent's staleness budget (ping_stale_after_seconds). Their state is unknown: the agent may be stuck or overloaded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 8,
-        "y": 38,
+        "y": 1,
         "w": 4,
-        "h": 6
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count((time() - ping_last_check_timestamp_seconds{target=~\"$target\"}) > ignoring(target) group_left ping_stale_after_seconds) or vector(0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
       }
     },
     {
+      "type": "stat",
+      "id": 5,
+      "title": "Alerts firing",
+      "description": "Prometheus alerts currently firing (all alert rules, not only the selected targets).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#e0603b",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Uptime, time range",
+      "description": "Average share of samples in which each selected target was up, over the dashboard time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "avg(avg_over_time(ping_up{target=~\"$target\"}[$__range]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0603b",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 0.95
+              },
+              {
+                "color": "#7dbb8b",
+                "value": 0.99
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 7,
+      "title": "Slowest p95, time range",
+      "description": "The highest p95 response latency among the selected targets over the dashboard time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(histogram_quantile(0.95, sum by (target, le) (rate(ping_latency_seconds_bucket{target=~\"$target\"}[$__range]))))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 1
+              },
+              {
+                "color": "#e0603b",
+                "value": 3
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "table",
+      "id": 8,
+      "title": "Targets",
+      "description": "One row per configured target. State and last result come from the latest check, after retries; PENDING means not checked yet. 'In state for' counts from the last up/down change or the agent's last restart, whichever is later (the status page reconciles it with outage history). 'Checked' is the age of that check. Uptime covers the dashboard time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "I",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_target_info{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_up{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target, reason) (ping_last_result{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (time() - ping_state_change_timestamp_seconds{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (time() - ping_last_check_timestamp_seconds{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_last_latency_seconds{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_last_status_code{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "avg by (target) (avg_over_time(ping_up{target=~\"$target\"}[$__range]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "min by (target) (ping_ssl_cert_expiry_days{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "target",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "target",
+                "Value #A",
+                "reason",
+                "Value #C",
+                "Value #D",
+                "Value #E",
+                "Value #F",
+                "Value #H",
+                "Value #G"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "target": 0,
+              "Value #A": 1,
+              "reason": 2,
+              "Value #C": 3,
+              "Value #D": 4,
+              "Value #E": 5,
+              "Value #F": 6,
+              "Value #H": 7,
+              "Value #G": 8
+            },
+            "renameByName": {
+              "target": "Target",
+              "Value #A": "State",
+              "reason": "Last result",
+              "Value #C": "In state for",
+              "Value #D": "Checked",
+              "Value #E": "Latency",
+              "Value #F": "HTTP",
+              "Value #H": "Uptime",
+              "Value #G": "Cert"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "noValue": "\u2014"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Target"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "PENDING"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "DOWN",
+                        "color": "#e0603b",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "UP",
+                        "color": "#7dbb8b",
+                        "index": 1
+                      }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "PENDING",
+                        "color": "#8c88a6",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last result"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "color": "#7dbb8b",
+                        "index": 0
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": "^(?!ok$).+",
+                      "result": {
+                        "color": "#e0603b",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "In state for"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dtdurations"
+              },
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Checked"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    },
+                    {
+                      "color": "#e6a23c",
+                      "value": 95
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Latency"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "HTTP"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Uptime"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#e0603b",
+                      "value": null
+                    },
+                    {
+                      "color": "#e6a23c",
+                      "value": 0.95
+                    },
+                    {
+                      "color": "#7dbb8b",
+                      "value": 0.99
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cert"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix: d"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#e0603b",
+                      "value": null
+                    },
+                    {
+                      "color": "#e6a23c",
+                      "value": 7
+                    },
+                    {
+                      "color": "text",
+                      "value": 14
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "State",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "id": 9,
+      "title": "History",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "state-timeline",
+      "id": 10,
+      "title": "Up / down over time",
+      "description": "The agent's verdict per target, after retries. Gaps mean no data (agent down or target not configured yet).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_up{target=~\"$target\"})",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8c88a6"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Down",
+                  "color": "#e0603b",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Up",
+                  "color": "#7dbb8b",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "left",
+        "rowHeight": 0.75,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 11,
+      "title": "Latency",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
       "type": "timeseries",
-      "title": "Ping Latency p95 (5m) - google.com",
+      "id": 12,
+      "title": "p95 response latency",
+      "description": "95th percentile latency of checks that received an HTTP response, over a rolling 5 minute window. Failed connections are excluded so they cannot make a dead target look fast.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (target, le) (rate(ping_latency_seconds_bucket{target=~\"$target\"}[5m])))",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisBorderShow": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 13,
+      "title": "Where the latest check's time went",
+      "description": "Connection phases of each target's latest check. 'Server' is the remainder: time from an open connection to the response headers. Keep-alives are off, so every check pays the full DNS + TCP + TLS cost.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_dns_duration_seconds{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_connect_duration_seconds{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (ping_tls_duration_seconds{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "clamp_min(max by (target) (ping_last_latency_seconds{target=~\"$target\"}) - (max by (target) (ping_dns_duration_seconds{target=~\"$target\"}) or 0 * max by (target) (ping_last_latency_seconds{target=~\"$target\"})) - (max by (target) (ping_connect_duration_seconds{target=~\"$target\"}) or 0 * max by (target) (ping_last_latency_seconds{target=~\"$target\"})) - (max by (target) (ping_tls_duration_seconds{target=~\"$target\"}) or 0 * max by (target) (ping_last_latency_seconds{target=~\"$target\"})), 0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "target",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "target",
+                "Value #A",
+                "Value #B",
+                "Value #C",
+                "Value #D"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "target": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
+            },
+            "renameByName": {
+              "target": "target",
+              "Value #A": "DNS",
+              "Value #B": "TCP",
+              "Value #C": "TLS",
+              "Value #D": "Server"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "DNS"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#7fb3d5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TCP"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6cc2b6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TLS"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d9b98a"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Server"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#a3a9bb"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "stacking": "normal",
+        "xField": "target",
+        "showValue": "never",
+        "groupWidth": 0.7,
+        "barWidth": 0.9,
+        "fullHighlight": false,
+        "xTickLabelMaxLength": 28,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 14,
+      "title": "Early warnings",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "Retries per hour",
+      "description": "Attempts the agent had to retry, as an hourly rate over 5 minutes. A target that stays up but keeps needing retries is degrading before it goes down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "3600 * sum by (target) (rate(ping_retries_total{target=~\"$target\"}[5m]))",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisBorderShow": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "noValue": "No retries in this range",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
       "id": 16,
-      "datasource": "Prometheus",
+      "title": "TLS certificate days left",
+      "description": "From each HTTPS target's latest check. CertificateExpiringSoon fires below 14 days; negative means expired.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 7
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ping_latency_seconds_bucket{target=\"https://google.com\"}[5m])))",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "min by (target) (ping_ssl_cert_expiry_days{target=~\"$target\"})",
+          "legendFormat": "{{target}}",
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "suffix: days",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0603b",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 7
+              },
+              {
+                "color": "#7dbb8b",
+                "value": 14
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0,
+          "noValue": "No HTTPS targets"
         },
         "overrides": []
       },
-      "gridPos": {
-        "x": 0,
-        "y": 44,
-        "w": 6,
-        "h": 6
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "wideLayout": true,
+        "showPercentChange": false
       }
     },
     {
-      "type": "timeseries",
-      "title": "Ping Latency p95 (5m) - github.com",
-      "id": 27,
-      "datasource": "Prometheus",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ping_latency_seconds_bucket{target=\"https://github.com\"}[5m])))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
+      "type": "row",
+      "id": 17,
+      "title": "Monitoring pipeline",
+      "collapsed": false,
       "gridPos": {
-        "x": 6,
-        "y": 44,
-        "w": 6,
-        "h": 6
-      }
+        "x": 0,
+        "y": 38,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
     },
     {
       "type": "stat",
-      "title": "Scrape Up (ping-agent)",
       "id": 18,
-      "datasource": "Prometheus",
+      "title": "ping-agent",
+      "description": "Can Prometheus scrape the ping-agent? If not, nothing is being checked (PingAgentDown).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "max(up{job=\"ping-agent\"})",
-          "refId": "A"
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -702,34 +1602,79 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#e0603b",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#7dbb8b",
                 "value": 1
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "#e0603b",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "#7dbb8b",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "noValue": "NOT SCRAPED"
         },
         "overrides": []
       },
-      "gridPos": {
-        "x": 0,
-        "y": 50,
-        "w": 3,
-        "h": 4
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
       }
     },
     {
       "type": "stat",
-      "title": "Scrape Up (api-gateway)",
       "id": 19,
-      "datasource": "Prometheus",
+      "title": "api-gateway",
+      "description": "Can Prometheus scrape the status API? If not, the status page is down (ApiGatewayDown).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 39,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "expr": "max(up{job=\"api-gateway\"})",
-          "refId": "A"
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -742,51 +1687,416 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#e0603b",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#7dbb8b",
                 "value": 1
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "#e0603b",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "#7dbb8b",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "noValue": "NOT SCRAPED"
         },
         "overrides": []
       },
-      "gridPos": {
-        "x": 3,
-        "y": 50,
-        "w": 3,
-        "h": 4
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
       }
     },
     {
-      "type": "timeseries",
-      "title": "Scrape Duration (s)",
+      "type": "stat",
       "id": 20,
-      "datasource": "Prometheus",
+      "title": "Check interval",
+      "description": "PING_INTERVAL_SECONDS as reported by the agent.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
-          "expr": "scrape_duration_seconds{job=~\"ping-agent|api-gateway\"}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(ping_interval_seconds)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "suffix: s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
         },
         "overrides": []
       },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 21,
+      "title": "Stale after",
+      "description": "Checks older than this are treated as unknown: two intervals plus one worst-case check (all retries timing out).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "gridPos": {
         "x": 6,
-        "y": 50,
+        "y": 43,
         "w": 6,
         "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(ping_stale_after_seconds)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Age of each target's last check",
+      "description": "A healthy agent draws a sawtooth that resets every interval. A line climbing through the dashed limit means checks have stopped finishing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 39,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "time() - max by (target) (ping_last_check_timestamp_seconds{target=~\"$target\"})",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(ping_stale_after_seconds)",
+          "legendFormat": "stale after",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisBorderShow": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stale after"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e6a23c"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Status API requests",
+      "description": "Requests to the api-gateway by route template and status code.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (path, status) (rate(api_gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "{{path}} \u00b7 {{status}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisBorderShow": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Status API p95 latency",
+      "description": "How long the api-gateway takes to answer, by route. /history and /outages query Prometheus and are cached for PROMETHEUS_QUERY_CACHE_SECONDS.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 47,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(api_gateway_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{path}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisBorderShow": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     }
-  ],
-  "templating": {
-    "list": []
-  }
+  ]
 }
