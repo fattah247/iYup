@@ -44,9 +44,12 @@ export PING_TARGET_URLS="http://$HELPER_NAME:8080"
 export PING_INTERVAL_SECONDS="5"
 export PING_RETRY_COUNT="2"
 
-docker compose up -d --force-recreate ping-agent api-gateway >/dev/null
+# Create the containers (and their network) first, so the helper is already
+# listening when the agent's very first check arrives and answers it with 503.
+# --build: test the code in this checkout, not whatever image is cached.
+docker compose create --build --force-recreate ping-agent api-gateway >/dev/null
 
-ping_agent_cid="$(docker compose ps -q ping-agent)"
+ping_agent_cid="$(docker compose ps -a -q ping-agent)"
 network_name="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$ping_agent_cid")"
 
 docker run -d --rm \
@@ -56,7 +59,15 @@ docker run -d --rm \
   python:3.11-alpine \
   python /opt/reliability/flaky_http_server.py >/dev/null
 
-docker compose restart ping-agent api-gateway >/dev/null
+# A bare TCP connect does not count as a request, so the one 503 is kept for the agent.
+for _ in {1..20}; do
+  if docker exec "$HELPER_NAME" python -c "import socket; socket.create_connection(('127.0.0.1', 8080), 1)" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+
+docker compose up -d ping-agent api-gateway >/dev/null
 
 api_ready=0
 for _ in {1..30}; do
@@ -70,7 +81,15 @@ done
 
 [[ "$api_ready" -eq 1 ]] || fail "api health"
 
-status_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/status")"
+# Wait for the first completed check: before it, the target is "unknown".
+status_body=""
+for _ in {1..20}; do
+  status_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/status")"
+  if [[ "$status_body" == *'"state":"up"'* || "$status_body" == *'"state":"down"'* ]]; then
+    break
+  fi
+  sleep 2
+done
 metrics_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/metrics")"
 
 python3 - "$status_body" "$metrics_body" <<'PY'
@@ -83,9 +102,11 @@ targets = payload.get("targets", [])
 assert targets, "no targets returned"
 target = targets[0]
 assert target["url"] == "http://iyup-flaky-demo:8080", target
-assert target["up"] is True, target
+assert target["state"] == "up" and target["up"] is True, target
 assert target["total_checks"] >= 1, target
 assert target["availability"] == 100.0, target
+assert target["failures"] == 0, target
+assert target["retries"] >= 1, target  # the absorbed 503 is still visible
 assert "api_gateway_requests_total" in metrics, "missing API metrics"
 PY
 

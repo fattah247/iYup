@@ -5,14 +5,6 @@ metadata:
   labels:
     {{- include "iyup.labels" . | nindent 4 }}
 data:
+  # Same file Docker Compose uses: files/alert.rules.yml links to config/alert.rules.yml.
   alert.rules.yml: |
-    groups:
-      - name: ping-agent.rules
-        rules:
-          - alert: TargetDown
-            expr: 'increase(ping_failure_total[1m]) > 2'
-            for: 1m
-            labels:
-              severity: critical
-            annotations:
-              summary: 'Target down'
+{{ .Files.Get "files/alert.rules.yml" | indent 4 }}
