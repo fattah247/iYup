@@ -1,0 +1,176 @@
+# Unit tests for alert.rules.yml, run with promtool (see the header of that file).
+# Each test starts at t=0; one sample every 15s, matching the scrape interval.
+
+rule_files:
+  - alert.rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: hard-down target fires TargetDown after a minute, with the reason
+    interval: 15s
+    input_series:
+      - series: 'ping_up{job="ping-agent",instance="ping-agent:8080",target="https://down.example"}'
+        values: '1 1 0x20'
+      - series: 'ping_last_result{job="ping-agent",instance="ping-agent:8080",target="https://down.example",reason="connection_refused"}'
+        values: '1x22'
+      - series: 'ping_up{job="ping-agent",instance="ping-agent:8080",target="https://fine.example"}'
+        values: '1x22'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ping-agent
+              instance: ping-agent:8080
+              target: https://down.example
+            exp_annotations:
+              summary: "https://down.example is down"
+              description: "Every check of https://down.example has failed for at least a minute, after retries. Latest reason: connection_refused."
+              runbook: docs/OPERATIONS_RUNBOOK.md#targetdown
+
+  - name: an agent restart (stale ping_up) does not resolve TargetDown; recovery does
+    interval: 15s
+    input_series:
+      - series: 'ping_up{job="ping-agent",instance="ping-agent:8080",target="https://down.example"}'
+        # down from 30s; the agent restarts at 3m (staleness marker); still down; recovers at 6m
+        values: '1 1 0x9 stale 0x11 1x8'
+      - series: 'ping_last_result{job="ping-agent",instance="ping-agent:8080",target="https://down.example",reason="timeout"}'
+        values: '1x32'
+    alert_rule_test:
+      - eval_time: 3m15s
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ping-agent
+              instance: ping-agent:8080
+              target: https://down.example
+            exp_annotations:
+              summary: "https://down.example is down"
+              description: "Every check of https://down.example has failed for at least a minute, after retries. Latest reason: timeout."
+              runbook: docs/OPERATIONS_RUNBOOK.md#targetdown
+      - eval_time: 6m15s
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: flapping target never trips TargetDown but trips TargetUnreliable
+    interval: 15s
+    input_series:
+      - series: 'ping_up{job="ping-agent",instance="ping-agent:8080",target="https://flaky.example"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TargetUnreliable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ping-agent
+              instance: ping-agent:8080
+              target: https://flaky.example
+            exp_annotations:
+              summary: "https://flaky.example keeps failing intermittently"
+              description: "https://flaky.example was up for only 51.22% of the last 15 minutes."
+              runbook: docs/OPERATIONS_RUNBOOK.md#targetunreliable
+
+  - name: one clean outage does not leave a TargetUnreliable warning after recovery
+    interval: 15s
+    input_series:
+      - series: 'ping_up{job="ping-agent",instance="ping-agent:8080",target="https://blip.example"}'
+        # up 2m, down 5m, then up again
+        values: '1x8 0x19 1x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: TargetUnreliable
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: a target whose checks stop finishing goes stale; a fresh one does not
+    interval: 15s
+    input_series:
+      - series: 'ping_stale_after_seconds{job="ping-agent",instance="ping-agent:8080"}'
+        values: '91.5x30'
+      - series: 'ping_last_check_timestamp_seconds{job="ping-agent",instance="ping-agent:8080",target="https://stuck.example"}'
+        values: '0 0 30 30 60 60 90 90 120x22'
+      - series: 'ping_last_check_timestamp_seconds{job="ping-agent",instance="ping-agent:8080",target="https://fresh.example"}'
+        values: '0+15x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: TargetChecksStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: TargetChecksStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ping-agent
+              instance: ping-agent:8080
+              target: https://stuck.example
+            exp_annotations:
+              summary: "No fresh checks for https://stuck.example"
+              description: "The ping-agent is running but has not finished a check of https://stuck.example for 3m 0s, so its state is unknown. The agent may be overloaded or stuck."
+              runbook: docs/OPERATIONS_RUNBOOK.md#targetchecksstale
+
+  - name: losing the ping-agent itself is critical; losing the API is a warning
+    interval: 15s
+    input_series:
+      - series: 'up{job="ping-agent",instance="ping-agent:8080"}'
+        values: '1 1 0x20'
+      - series: 'up{job="api-gateway",instance="api-gateway:8080"}'
+        values: '1 1 0x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PingAgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ping-agent
+              instance: ping-agent:8080
+            exp_annotations:
+              summary: "The ping-agent is down"
+              description: "Prometheus cannot scrape ping-agent:8080. No targets are being checked and target alerts cannot fire until it is back."
+              runbook: docs/OPERATIONS_RUNBOOK.md#pingagentdown
+      - eval_time: 2m
+        alertname: ApiGatewayDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ApiGatewayDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api-gateway
+              instance: api-gateway:8080
+            exp_annotations:
+              summary: "The status API is down"
+              description: "The status page and JSON API at api-gateway:8080 are unavailable. Checks and alerting continue without it."
+              runbook: docs/OPERATIONS_RUNBOOK.md#apigatewaydown
+
+  - name: certificates close to expiry warn; healthy ones do not
+    interval: 1m
+    input_series:
+      - series: 'ping_ssl_cert_expiry_days{job="ping-agent",instance="ping-agent:8080",target="https://renew-me.example"}'
+        values: '13.5x20'
+      - series: 'ping_ssl_cert_expiry_days{job="ping-agent",instance="ping-agent:8080",target="https://healthy.example"}'
+        values: '90x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ping-agent
+              instance: ping-agent:8080
+              target: https://renew-me.example
+            exp_annotations:
+              summary: "TLS certificate for https://renew-me.example expires in 13.5 days"
+              description: "Renew the certificate. A negative value means it has already expired."
+              runbook: docs/OPERATIONS_RUNBOOK.md#certificateexpiringsoon

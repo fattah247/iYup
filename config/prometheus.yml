@@ -1,5 +1,8 @@
 global:
   scrape_interval: 15s
+  # Rules are evaluated every minute by default, which adds up to a minute of
+  # delay on top of each alert's `for:` and made alerting depend on timing luck.
+  evaluation_interval: 15s
 
 rule_files:
   - /etc/prometheus/rules/alert.rules.yml
