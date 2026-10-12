@@ -1,0 +1,15 @@
+# Demo overlay: targets in every state (up, slow, flaky, 503, refused).
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+services:
+  demo-targets:
+    image: python:3.11-alpine
+    command: ["python", "/opt/demo/demo_targets.py"]
+    volumes:
+      - ./scripts/reliability:/opt/demo:ro
+    restart: unless-stopped
+
+  ping-agent:
+    depends_on:
+      - demo-targets
+    environment:
+      - PING_TARGET_URLS=https://example.com,http://demo-targets:8080/slow,http://demo-targets:8080/flaky,http://demo-targets:8080/down,http://demo-targets:9

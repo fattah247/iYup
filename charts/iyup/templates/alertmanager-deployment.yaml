@@ -13,6 +13,8 @@ spec:
       app.kubernetes.io/component: alertmanager
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/alertmanager-secret.yaml") . | sha256sum }}
       labels:
         {{- include "iyup.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: alertmanager
@@ -27,10 +29,7 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/alertmanager
-          envFrom:
-            - secretRef:
-                name: {{ include "iyup.fullname" . }}-alertmanager-smtp
       volumes:
         - name: config
-          configMap:
-            name: {{ include "iyup.fullname" . }}-alertmanager-config
+          secret:
+            secretName: {{ include "iyup.fullname" . }}-alertmanager-config

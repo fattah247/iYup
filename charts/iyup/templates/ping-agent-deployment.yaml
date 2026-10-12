@@ -28,6 +28,8 @@ spec:
             value: '{{ join "," .Values.pingTargets }}'
           - name: PING_INTERVAL_SECONDS
             value: {{ .Values.pingAgent.intervalSeconds | quote }}
+          - name: PING_TIMEOUT_SECONDS
+            value: {{ .Values.pingAgent.timeoutSeconds | quote }}
           - name: PING_CONCURRENCY
             value: {{ .Values.pingAgent.concurrency | quote }}
           - name: PING_RETRY_COUNT

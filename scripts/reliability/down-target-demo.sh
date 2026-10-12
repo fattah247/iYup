@@ -42,7 +42,8 @@ export PING_TARGET_URLS="http://127.0.0.1:9"
 export PING_INTERVAL_SECONDS="5"
 export PING_RETRY_COUNT="2"
 
-docker compose up -d --force-recreate ping-agent api-gateway >/dev/null
+# --build: test the code in this checkout, not whatever image is cached.
+docker compose up -d --build --force-recreate ping-agent api-gateway >/dev/null
 
 api_ready=0
 for _ in {1..30}; do
@@ -56,7 +57,15 @@ done
 
 [[ "$api_ready" -eq 1 ]] || fail "api health"
 
-status_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/status")"
+# Wait for the first completed check: before it, the target is "unknown", not down.
+status_body=""
+for _ in {1..20}; do
+  status_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/status")"
+  if [[ "$status_body" == *'"state":"down"'* ]]; then
+    break
+  fi
+  sleep 2
+done
 
 python3 - "$status_body" <<'PY'
 import json
@@ -67,9 +76,12 @@ targets = payload.get("targets", [])
 assert targets, "no targets returned"
 target = targets[0]
 assert target["url"] == "http://127.0.0.1:9", target
-assert target["up"] is False, target
+assert target["state"] == "down" and target["up"] is False, target
+assert target["reason"] == "connection_refused", target
+assert target["latency_ms"] is None, target  # no response, so no latency
 assert target["total_checks"] >= 1, target
 assert target["availability"] == 0, target
+assert payload["status"] == "outage", payload["status"]
 PY
 
 pass "down target produces failure signal"

@@ -15,6 +15,9 @@ spec:
       app.kubernetes.io/component: grafana
   template:
     metadata:
+      annotations:
+        # Grafana did not reload provisioned dashboards without a restart.
+        checksum/provisioning: {{ include (print $.Template.BasePath "/grafana-provisioning-configmap.yaml") . | sha256sum }}
       labels:
         {{- include "iyup.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: grafana
@@ -24,10 +27,27 @@ spec:
           image: {{ .Values.image.grafana | quote }}
           ports:
             - containerPort: 3000
+          env:
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /etc/grafana/dashboards/iyup.json
           volumeMounts:
             - name: data
               mountPath: /var/lib/grafana
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yml
+              subPath: datasources.yml
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yml
+              subPath: dashboards.yml
+            - name: dashboards
+              mountPath: /etc/grafana/dashboards
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "iyup.fullname" . }}-grafana-data
+        - name: provisioning
+          configMap:
+            name: {{ include "iyup.fullname" . }}-grafana-provisioning
+        - name: dashboards
+          configMap:
+            name: {{ include "iyup.fullname" . }}-grafana-dashboards

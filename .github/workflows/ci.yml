@@ -12,7 +12,8 @@ on:
       - "charts/**"
       - "config/**"
       - "monitoring/**"
-      - "docker-compose.yml"
+      - "docker-compose*.yml"
+      - "scripts/**"
       - ".github/workflows/**"
   pull_request:
     branches:
@@ -24,7 +25,8 @@ on:
       - "charts/**"
       - "config/**"
       - "monitoring/**"
-      - "docker-compose.yml"
+      - "docker-compose*.yml"
+      - "scripts/**"
       - ".github/workflows/**"
 
 jobs:
@@ -48,7 +50,7 @@ jobs:
       - name: Go tests
         run: |
           cd services/ping-agent
-          go test ./...
+          go test -race ./...
 
   python:
     runs-on: ubuntu-latest
@@ -62,10 +64,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r services/api-gateway/requirements.txt
+          pip install -r services/api-gateway/requirements-dev.txt
       - name: Python lint
         run: |
-          python -m py_compile services/api-gateway/main.py
+          python -m py_compile services/api-gateway/*.py scripts/check_dashboard_queries.py scripts/reliability/*.py
       - name: Python tests
         run: |
           python -m unittest discover -s services/api-gateway -p "test*.py"
@@ -80,13 +82,35 @@ jobs:
       - name: Build api-gateway image
         run: docker build -t api-gateway:ci services/api-gateway
 
+  monitoring-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Prometheus config and alert rules
+        run: |
+          docker run --rm -v "$PWD/config:/etc/prometheus/rules:ro" -v "$PWD/config/prometheus.yml:/p.yml:ro" \
+            --entrypoint promtool prom/prometheus:v2.54.1 check config /p.yml
+      - name: Alert rule unit tests
+        run: |
+          docker run --rm -v "$PWD/config:/c:ro" --entrypoint promtool prom/prometheus:v2.54.1 \
+            test rules /c/alert.rules.test.yml
+      - name: Alertmanager config
+        run: |
+          docker run --rm -v "$PWD/config:/c:ro" --entrypoint amtool prom/alertmanager:v0.27.0 \
+            check-config /c/alertmanager.yml
+      - name: Grafana dashboard is valid JSON
+        run: python3 -m json.tool monitoring/grafana-dashboard.json > /dev/null
+
   compose:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Docker Compose config
-        run: docker compose config
+        run: |
+          docker compose config -q
+          docker compose -f docker-compose.yml -f docker-compose.demo.yml config -q
 
   helm:
     runs-on: ubuntu-latest

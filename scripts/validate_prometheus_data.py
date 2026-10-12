@@ -328,8 +328,12 @@ def main():
         print("  kubectl port-forward svc/iyup-prometheus 9090:9090")
         sys.exit(1)
     
-    # Expected targets (should match values.yaml or environment)
-    expected_targets = ["https://google.com", "https://github.com"]
+    # Expected targets: whatever the ping-agent says it is configured to check.
+    info = query_prometheus("ping_target_info")
+    expected_targets = sorted(
+        {r["metric"]["target"] for r in (info or {}).get("result", []) if r.get("metric", {}).get("target")}
+    ) or ["https://google.com", "https://github.com"]
+    print(f"Expected targets: {', '.join(expected_targets)}")
     
     # Run all validations
     targets_ok = check_targets_health()

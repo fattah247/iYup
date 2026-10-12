@@ -1,11 +1,90 @@
+# Alert rules for iYup. Behaviour is pinned by config/alert.rules.test.yml:
+#   docker run --rm -v "$PWD/config:/c:ro" --entrypoint promtool prom/prometheus:v2.54.1 test rules /c/alert.rules.test.yml
+# Helm reads this same file through charts/iyup/files/alert.rules.yml (a symlink).
+
 groups:
-  - name: ping-agent.rules
+  - name: iyup-targets
     rules:
+      # ping_up is the agent's verdict after retries, so this fires on sustained
+      # failure whatever PING_INTERVAL_SECONDS is. (The old rule counted failures
+      # per minute and could not fire at all once the interval reached 40s.)
+      # last_over_time bridges the brief gap while the agent restarts, which
+      # otherwise marks ping_up stale and resolves-then-repages on every deploy;
+      # a real recovery still resolves at once because the newest sample wins.
       - alert: TargetDown
-        expr: "increase(ping_failure_total[1m]) > 2"
+        expr: last_over_time(ping_up[2m]) == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "Target {{ $labels.target }} is down"
-          description: "{{ $labels.target }} has had more than 2 failures in the last minute."
+          summary: "{{ $labels.target }} is down"
+          description: >-
+            Every check of {{ $labels.target }} has failed for at least a minute, after retries.
+            Latest reason: {{ with query (printf "ping_last_result{target='%s'}" $labels.target) }}{{ (index . 0).Labels.reason }}{{ else }}unknown{{ end }}.
+          runbook: docs/OPERATIONS_RUNBOOK.md#targetdown
+
+      # Catches targets that fail some checks but never long enough for
+      # TargetDown. "More than two changes" is what makes it intermittent: a
+      # single clean outage is exactly two (down, then up) and must not leave a
+      # "keeps failing" warning behind once TargetDown resolves.
+      # Alertmanager suppresses it while TargetDown is firing.
+      - alert: TargetUnreliable
+        expr: avg_over_time(ping_up[15m]) < 0.9 and changes(ping_up[15m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.target }} keeps failing intermittently"
+          description: >-
+            {{ $labels.target }} was up for only {{ $value | humanizePercentage }} of the last 15 minutes.
+          runbook: docs/OPERATIONS_RUNBOOK.md#targetunreliable
+
+      - alert: TargetChecksStale
+        expr: (time() - ping_last_check_timestamp_seconds) > ignoring(target) group_left ping_stale_after_seconds
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No fresh checks for {{ $labels.target }}"
+          description: >-
+            The ping-agent is running but has not finished a check of {{ $labels.target }} for
+            {{ $value | humanizeDuration }}, so its state is unknown. The agent may be overloaded or stuck.
+          runbook: docs/OPERATIONS_RUNBOOK.md#targetchecksstale
+
+      - alert: CertificateExpiringSoon
+        expr: ping_ssl_cert_expiry_days < 14
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate for {{ $labels.target }} expires in {{ $value | printf \"%.1f\" }} days"
+          description: "Renew the certificate. A negative value means it has already expired."
+          runbook: docs/OPERATIONS_RUNBOOK.md#certificateexpiringsoon
+
+  - name: iyup-pipeline
+    rules:
+      # Without the agent nothing is checked, so TargetDown cannot fire.
+      # This is the alert that keeps a dead monitor from looking like silence.
+      - alert: PingAgentDown
+        expr: up{job="ping-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The ping-agent is down"
+          description: >-
+            Prometheus cannot scrape {{ $labels.instance }}. No targets are being checked and
+            target alerts cannot fire until it is back.
+          runbook: docs/OPERATIONS_RUNBOOK.md#pingagentdown
+
+      - alert: ApiGatewayDown
+        expr: up{job="api-gateway"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The status API is down"
+          description: >-
+            The status page and JSON API at {{ $labels.instance }} are unavailable.
+            Checks and alerting continue without it.
+          runbook: docs/OPERATIONS_RUNBOOK.md#apigatewaydown

@@ -30,8 +30,6 @@ spec:
           env:
             - name: PING_AGENT_METRICS_URL
               value: 'http://{{ include "iyup.fullname" . }}-ping-agent:8080/metrics'
-            - name: PING_TARGET_URLS
-              value: '{{ join "," .Values.pingTargets }}'
             - name: PROMETHEUS_URL
               value: 'http://{{ include "iyup.fullname" . }}-prometheus:9090'
           livenessProbe:

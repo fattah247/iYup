@@ -67,7 +67,10 @@ COMPOSE_SERVICES="$(docker compose config --services)"
 docker compose config >/dev/null
 pass "docker compose config"
 
-docker compose up -d >/dev/null 2>&1
+if ! up_output="$(docker compose up -d --build 2>&1)"; then
+  printf '%s\n' "$up_output" | tail -5 >&2
+  fail "docker compose up (a busy host port can be moved with e.g. GRAFANA_PORT=3001 in .env)"
+fi
 pass "docker compose up"
 
 wait_for_http "api healthz" "http://localhost:${API_GATEWAY_PORT}/healthz"
@@ -78,7 +81,12 @@ pass "api healthz body"
 
 status_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/status")"
 assert_contains "status endpoint" "$status_body" '"targets"'
+assert_contains "status endpoint reports per-target state" "$status_body" '"state"'
 pass "status endpoint"
+
+page_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/")"
+assert_contains "status page" "$page_body" '<title>iYup status</title>'
+pass "status page"
 
 targets_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/targets")"
 assert_contains "targets endpoint" "$targets_body" '"url"'
@@ -90,6 +98,15 @@ pass "metrics endpoint"
 
 if has_service prometheus; then
   wait_for_http "prometheus ready" "http://localhost:${PROMETHEUS_PORT}/-/ready"
+
+  rules_body="$(curl -fsS "http://localhost:${PROMETHEUS_PORT}/api/v1/rules")"
+  for rule in TargetDown TargetUnreliable TargetChecksStale CertificateExpiringSoon PingAgentDown ApiGatewayDown; do
+    assert_contains "alert rule $rule loaded" "$rules_body" "\"$rule\""
+  done
+  pass "alert rules loaded"
+
+  wait_for_http "history endpoint" "http://localhost:${API_GATEWAY_PORT}/history?window=1h&buckets=4"
+  wait_for_http "outages endpoint" "http://localhost:${API_GATEWAY_PORT}/outages?window=1h"
 fi
 
 if has_service grafana; then

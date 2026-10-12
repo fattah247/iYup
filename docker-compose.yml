@@ -4,6 +4,7 @@ services:
     environment:
       - PING_TARGET_URLS=${PING_TARGET_URLS:-https://google.com,https://github.com}
       - PING_INTERVAL_SECONDS=${PING_INTERVAL_SECONDS:-30}
+      - PING_TIMEOUT_SECONDS=${PING_TIMEOUT_SECONDS:-10}
       - PING_CONCURRENCY=${PING_CONCURRENCY:-5}
       - PING_RETRY_COUNT=${PING_RETRY_COUNT:-2}
       - PING_HTTP_METHOD=${PING_HTTP_METHOD:-GET}
@@ -21,8 +22,8 @@ services:
   api-gateway:
     build: services/api-gateway
     environment:
+      # Targets are discovered from the ping-agent, so the two cannot drift.
       - PING_AGENT_METRICS_URL=http://ping-agent:8080/metrics
-      - PING_TARGET_URLS=${PING_TARGET_URLS:-https://google.com,https://github.com}
       - PROMETHEUS_URL=http://prometheus:9090
       - PROMETHEUS_QUERY_CACHE_SECONDS=${PROMETHEUS_QUERY_CACHE_SECONDS:-15}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
@@ -55,14 +56,15 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.0.1
     volumes:
       - grafana-data:/var/lib/grafana
       - ./config/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
       - ./config/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
-      - ./monitoring:/var/lib/grafana/dashboards:ro
+      - ./monitoring/grafana-dashboard.json:/etc/grafana/dashboards/iyup.json:ro
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/dashboards/iyup.json
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
     depends_on:

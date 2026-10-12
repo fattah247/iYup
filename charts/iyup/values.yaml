@@ -1,7 +1,7 @@
 nameOverride: ""
 fullnameOverride: ""
 
-pingTargets: # rendered into PING_TARGET_URLS for both ping-agent and api-gateway
+pingTargets: # rendered into PING_TARGET_URLS for the ping-agent; the api-gateway discovers them from it
   - https://google.com
   - https://github.com
 
@@ -9,12 +9,13 @@ image:
   pingAgent: ping-agent:latest
   apiGateway: api-gateway:latest
   prometheus: prom/prometheus:v2.54.1
-  grafana: grafana/grafana:latest
+  grafana: grafana/grafana:13.0.1
   alertmanager: prom/alertmanager:v0.27.0
   alertLogger: mendhak/http-https-echo:36
 
 pingAgent:
   intervalSeconds: 30
+  timeoutSeconds: 10
   concurrency: 5
   retryCount: 2
   httpMethod: GET
@@ -37,12 +38,14 @@ grafana:
   pvcSize: 5Gi
 
 alert:
+  # Every alert goes to the in-cluster alert-logger. Email and Slack receivers
+  # are added only when configured; put real values in a git-ignored values file.
   smtp:
-    smarthost: smtp.gmail.com:587
-    from: alerts@example.com
-    user: example@gmail.com
-    password: REPLACE_ME_APP_PASSWORD
-    to: myalerts@gmail.com
+    smarthost: "" # e.g. smtp.gmail.com:587
+    from: ""
+    user: ""
+    password: ""
+    to: ""
   slackWebhook: ""
 
 ingress:

@@ -8,6 +8,12 @@ route:
   group_interval: 5m
   repeat_interval: 1h
 
+# A hard-down target already has TargetDown; don't also page for "unreliable".
+inhibit_rules:
+  - source_matchers: [alertname="TargetDown"]
+    target_matchers: [alertname="TargetUnreliable"]
+    equal: [target]
+
 receivers:
   - name: default
     webhook_configs: []
