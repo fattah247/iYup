@@ -1,53 +1,95 @@
 # Reliability Scenarios
 
+The demo overlay starts targets in every state at once:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+```
+
+| Target | Behaviour |
+|---|---|
+| `https://example.com` | real HTTPS site |
+| `http://demo-targets:8080/slow` | answers in 0.6–1.4s |
+| `http://demo-targets:8080/flaky` | `503` about 40% of the time |
+| `http://demo-targets:8080/down` | always `503` |
+| `http://demo-targets:9` | nothing listening: connection refused |
+
+The helper is `scripts/reliability/demo_targets.py` (standard library only).
+
 ## Healthy endpoint
 
-- target stays up
-- latency is recorded
-- metrics are exposed
-- the dashboard stays stable
+- state `up`, reason `ok`, latency and DNS/TCP/TLS phases recorded, certificate expiry known
+- `TargetDown` does not fire
 
-Verified in the local Docker Compose run.
+Verified with the demo overlay: `example.com` reported `up`, HTTP `206` (the agent asks for a single byte), and about 74 days of certificate left.
 
 ## Down endpoint
 
-- retry logic runs before the target is marked down
-- failure count rises
-- availability drops
-- the alert rule can fire
+- retries run first, then the check counts as failed
+- the API says **why**: `http_5xx` with `http_status: 503`, or `connection_refused` with `latency_ms: null` (no response, no fake fast latency)
+- `TargetDown` fires after one minute, with the reason in its description
+- the outage appears in `/outages` as `ongoing`
 
-Replay:
+Replay (swaps the targets for a dead port):
 
 ```bash
 ./scripts/reliability/down-target-demo.sh
 ```
 
-This replay swaps the target to `http://127.0.0.1:9`, waits for a full check cycle, and confirms that the target shows up as down.
+Verified with the demo overlay: both down targets were classified correctly, and `TargetDown` fired about a minute after the first failed check.
 
 ## Slow endpoint
 
-- target can stay up while latency rises
-- histograms and p95 values move first
-- the dashboard should show the degradation
+- the target stays `up` while latency rises
+- p95 moves on the status page and in Grafana; the "Where the latest check's time went" panel shows the time is server-side, not network
 
-The metrics exist. The repo does not include a dedicated slow-target capture.
+The latency histogram buckets are dense between 0.1s and 3s. With Prometheus' default buckets, this endpoint's p95 read 2.4s although no response took longer than 1.4s. The estimate was interpolated across the empty 1–2.5s bucket.
 
 ## Transient failure
 
-- retry and backoff reduce noise
-- the target should not flap on the first miss
+- one `503` followed by a success is absorbed by a retry: state stays `up`, availability stays 100%
+- the retry is still counted in `ping_retries_total`, so absorbed failures are visible ("Retries per hour" panel)
 
-Replay:
+Replay (one `503`, then healthy):
 
 ```bash
 ./scripts/reliability/transient-target-demo.sh
 ```
 
-This replay uses a helper endpoint that returns one `503` and then recovers. The final status stays up and the first miss does not leave a recorded failure.
+## Intermittent failure
+
+- `/flaky` fails some checks outright (all three attempts hit a `503`) but never for a full minute, so `TargetDown` never fires
+- `TargetUnreliable` fires when the target is up less than 90% of 15 minutes *and* changed state more than twice; one clean outage that recovers does not leave this warning behind
+- Alertmanager suppresses `TargetUnreliable` while `TargetDown` fires for the same target
+
+Pinned by the "flapping target" and "one clean outage" cases in `config/alert.rules.test.yml`.
+
+## Agent restart
+
+- the agent's in-process state (lifetime counts, percentiles, `state_since`) restarts; Prometheus history does not
+- `TargetDown` keeps firing across the restart instead of resolving and paging again a minute later
+
+Verified live: alerts stayed firing through `docker compose restart ping-agent`. Pinned by the "agent restart" case in the rule tests.
+
+## Agent stuck or overloaded
+
+- if checks stop finishing, targets turn `unknown` with `stale: true` after `ping_stale_after_seconds`, and the overall status becomes `unknown`, never `operational`
+- `TargetChecksStale` fires
+
+Pinned by the "stale" case in the rule tests and by `test_stale_data_is_unknown_not_up` in the gateway tests.
+
+## Agent down
+
+- `/status` answers `502` with `ping-agent is unreachable`; the status page keeps the last data, dims it, and says it could not refresh
+- `PingAgentDown` fires; without it, a dead monitor would look like silence
 
 ## Prometheus unavailable
 
-- `/healthz` stays separate from Prometheus
-- Prometheus-backed windowed endpoints can fail upstream
+- `/status` keeps working: it reads the agent directly
+- `/history` and `/outages` answer `502`; the status page shows "History unavailable" and falls back to the agent's lifetime numbers, labelled as such
+- `/healthz` stays separate from both dependencies
 
-`/uptime-summary-windowed` depends on Prometheus data.
+## Startup
+
+- before the first check, targets are `unknown` / `pending` and the overall status is `unknown`, not `degraded`
+- the gateway's target list comes from the agent, so a target configured in one place and not the other cannot be reported as down

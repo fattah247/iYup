@@ -12,7 +12,7 @@ ALERTMANAGER_PORT="${ALERTMANAGER_PORT:-9093}"
 ```
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
 docker compose ps
 ```
 
@@ -22,6 +22,22 @@ curl -fsS "http://localhost:${API_GATEWAY_PORT}/healthz"
 
 ```bash
 curl -fsS "http://localhost:${API_GATEWAY_PORT}/status" | python3 -m json.tool
+```
+
+```bash
+curl -fsS "http://localhost:${API_GATEWAY_PORT}/history?window=1h&buckets=12" | python3 -m json.tool
+```
+
+```bash
+curl -fsS "http://localhost:${API_GATEWAY_PORT}/outages?window=1h" | python3 -m json.tool
+```
+
+```bash
+curl -fsS "http://localhost:${PROMETHEUS_PORT}/api/v1/alerts" | python3 -m json.tool
+```
+
+```bash
+python3 scripts/check_dashboard_queries.py "http://localhost:${PROMETHEUS_PORT}"
 ```
 
 ```bash
