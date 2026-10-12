@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Live uptime, latency and outage history from iYup.">
+  <meta name="color-scheme" content="light dark">
+  <title>iYup status</title>
+  <link rel="icon" id="favicon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/status.css">
+  <script type="module" src="/assets/status.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#targets-heading">Skip to targets</a>
+
+  <header class="topbar">
+    <div class="wrap topbar__inner">
+      <a class="brand" href="/" aria-label="iYup status home">
+        <svg class="brand__mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="9"/><path d="M5 13h3l2-4 3 8 2-4h4"/></svg>
+        <span class="brand__name">iYup</span>
+      </a>
+      <div class="freshness">
+        <span id="updated" class="freshness__text">Connecting…</span>
+        <button id="refresh" class="icon-button" type="button" aria-label="Refresh now">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <section class="hero" data-state="loading" aria-labelledby="headline">
+      <svg class="critter" viewBox="0 0 64 64" aria-hidden="true">
+        <g class="critter__antenna">
+          <path d="M32 13V5"/>
+          <circle class="critter__beacon" cx="32" cy="5" r="3.5"/>
+        </g>
+        <rect class="critter__body" x="7" y="13" width="50" height="44" rx="20"/>
+        <ellipse class="critter__cheek" cx="17.5" cy="40" rx="4" ry="2.6"/>
+        <ellipse class="critter__cheek" cx="46.5" cy="40" rx="4" ry="2.6"/>
+        <g class="critter__eyes critter__eyes--open">
+          <circle cx="24" cy="32" r="3.2"/>
+          <circle cx="40" cy="32" r="3.2"/>
+        </g>
+        <g class="critter__eyes critter__eyes--sleepy">
+          <path d="M20.5 32.5q3.5 2.5 7 0"/>
+          <path d="M36.5 32.5q3.5 2.5 7 0"/>
+        </g>
+        <path class="critter__mouth critter__mouth--smile" d="M27 40q5 5 10 0"/>
+        <path class="critter__mouth critter__mouth--wavy" d="M26.5 42q2.75-2.5 5.5 0t5.5 0"/>
+        <path class="critter__mouth critter__mouth--frown" d="M27 44q5-5 10 0"/>
+        <path class="critter__mouth critter__mouth--flat" d="M28.5 42h7"/>
+      </svg>
+      <div class="hero__text">
+        <h1 id="headline" class="hero__headline">Checking…</h1>
+        <p id="subline" class="hero__subline">Asking the ping-agent how everything is doing.</p>
+      </div>
+    </section>
+
+    <div id="banner" class="banner" role="alert" hidden></div>
+
+    <section class="panel" aria-labelledby="targets-heading">
+      <div class="panel__head">
+        <h2 id="targets-heading" class="panel__title">Targets</h2>
+        <div class="segmented" role="radiogroup" aria-label="History window">
+          <button type="button" role="radio" data-window="1h" aria-checked="false">1h</button>
+          <button type="button" role="radio" data-window="24h" aria-checked="true">24h</button>
+          <button type="button" role="radio" data-window="7d" aria-checked="false">7d</button>
+        </div>
+      </div>
+      <p id="history-note" class="panel__note" hidden></p>
+      <ul id="targets" class="targets" aria-busy="true">
+        <li class="target target--skeleton" aria-hidden="true"><div class="skeleton"></div></li>
+        <li class="target target--skeleton" aria-hidden="true"><div class="skeleton"></div></li>
+      </ul>
+    </section>
+
+    <section class="panel" aria-labelledby="outages-heading">
+      <div class="panel__head">
+        <h2 id="outages-heading" class="panel__title">Outages</h2>
+        <span id="outages-window" class="panel__meta"></span>
+      </div>
+      <div id="outages" class="outages"></div>
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    <p>Checks run by the iYup ping-agent; history kept by Prometheus. Times are shown in your time zone.</p>
+    <p><a href="/docs">API docs</a> · <a href="/status">status.json</a></p>
+  </footer>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div id="announcer" class="visually-hidden" aria-live="polite"></div>
+</body>
+</html>
