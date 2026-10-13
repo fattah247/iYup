@@ -1,5 +1,7 @@
 # Secrets and sensitive files
 k8s/alertmanager-secret.yaml
+config/*.local.yml
+config/secrets/
 *.env
 .env
 .env.local
@@ -128,3 +130,6 @@ logs/
 local/
 tmp/
 temp/
+
+# Local build output
+services/ping-agent/ping-agent

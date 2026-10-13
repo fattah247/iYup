@@ -1,0 +1,2 @@
+# Ping-agents Prometheus scrapes, one per region.
+- targets: [ping-agent:8080]
