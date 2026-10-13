@@ -49,7 +49,7 @@
         "iconColor": "#e0603b",
         "name": "Target down",
         "titleFormat": "{{target}} down",
-        "expr": "changes(max by (target) (ping_up{target=~\"$target\"})[1m:15s]) > 0 and max by (target) (ping_up{target=~\"$target\"}) == 0",
+        "expr": "changes(max by (target) (iyup:target_up:quorum{target=~\"$target\"})[1m:15s]) > 0 and max by (target) (iyup:target_up:quorum{target=~\"$target\"}) == 0",
         "step": "60s",
         "textFormat": "State changed to down",
         "useValueForTime": false
@@ -122,7 +122,7 @@
       "type": "stat",
       "id": 2,
       "title": "Up",
-      "description": "Targets whose latest check succeeded.",
+      "description": "Targets a majority of regions see up.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -140,7 +140,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(max by (target) (ping_up{target=~\"$target\"}) == 1) or vector(0)",
+          "expr": "count(((max by (target) (iyup:target_up:quorum{target=~\"$target\"}) + max by (target) (iyup:target_degraded:quorum{target=~\"$target\"})) or max by (target) (iyup:target_up:quorum{target=~\"$target\"}) or max by (target) (ping_up{target=~\"$target\"})) >= 1) or vector(0)",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -186,7 +186,7 @@
       "type": "stat",
       "id": 3,
       "title": "Down",
-      "description": "Targets whose latest check failed, after retries. Lights up when any target is down.",
+      "description": "Targets a majority of regions see down, after retries. Lights up when any target is down.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -204,7 +204,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(max by (target) (ping_up{target=~\"$target\"}) == 0) or vector(0)",
+          "expr": "count(((max by (target) (iyup:target_up:quorum{target=~\"$target\"}) + max by (target) (iyup:target_degraded:quorum{target=~\"$target\"})) or max by (target) (iyup:target_up:quorum{target=~\"$target\"}) or max by (target) (ping_up{target=~\"$target\"})) == 0) or vector(0)",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -253,8 +253,8 @@
     {
       "type": "stat",
       "id": 4,
-      "title": "Stale",
-      "description": "Targets whose last check is older than the agent's staleness budget (ping_stale_after_seconds). Their state is unknown: the agent may be stuck or overloaded.",
+      "title": "Slow",
+      "description": "Targets that are up but slower than their degraded_after threshold in most regions.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -272,7 +272,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count((time() - ping_last_check_timestamp_seconds{target=~\"$target\"}) > ignoring(target) group_left ping_stale_after_seconds) or vector(0)",
+          "expr": "count(((max by (target) (iyup:target_up:quorum{target=~\"$target\"}) + max by (target) (iyup:target_degraded:quorum{target=~\"$target\"})) or max by (target) (iyup:target_up:quorum{target=~\"$target\"}) or max by (target) (ping_up{target=~\"$target\"})) == 2) or vector(0)",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -321,8 +321,8 @@
     {
       "type": "stat",
       "id": 5,
-      "title": "Alerts firing",
-      "description": "Prometheus alerts currently firing (all alert rules, not only the selected targets).",
+      "title": "Stale",
+      "description": "Target checks older than their staleness budget (ping_stale_after_seconds). Their state is unknown: an agent may be stuck or overloaded.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -340,7 +340,75 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)",
+          "expr": "count((time() - ping_last_check_timestamp_seconds{target=~\"$target\"}) > ping_stale_after_seconds) or vector(0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Alerts firing",
+      "description": "Prometheus alerts currently firing, all rules, not counting the always-on Watchdog heartbeat.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(ALERTS{alertstate=\"firing\", alertname!=\"Watchdog\"}) or vector(0)",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -388,15 +456,15 @@
     },
     {
       "type": "stat",
-      "id": 6,
+      "id": 7,
       "title": "Uptime, time range",
-      "description": "Average share of samples in which each selected target was up, over the dashboard time range.",
+      "description": "Average share of time each selected target was up (by region majority) over the dashboard time range.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 16,
+        "x": 20,
         "y": 1,
         "w": 4,
         "h": 4
@@ -408,7 +476,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "avg(avg_over_time(ping_up{target=~\"$target\"}[$__range]))",
+          "expr": "avg(avg_over_time(iyup:target_up:quorum{target=~\"$target\"}[$__range]) or avg by (target) (avg_over_time(ping_up{target=~\"$target\"}[$__range])))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -460,82 +528,10 @@
       }
     },
     {
-      "type": "stat",
-      "id": 7,
-      "title": "Slowest p95, time range",
-      "description": "The highest p95 response latency among the selected targets over the dashboard time range.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 20,
-        "y": 1,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max(histogram_quantile(0.95, sum by (target, le) (rate(ping_latency_seconds_bucket{target=~\"$target\"}[$__range]))))",
-          "legendFormat": "__auto",
-          "range": false,
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              },
-              {
-                "color": "#e6a23c",
-                "value": 1
-              },
-              {
-                "color": "#e0603b",
-                "value": 3
-              }
-            ]
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "wideLayout": true,
-        "showPercentChange": false
-      }
-    },
-    {
       "type": "table",
       "id": 8,
       "title": "Targets",
-      "description": "One row per configured target. State and last result come from the latest check, after retries; PENDING means not checked yet. 'In state for' counts from the last up/down change or the agent's last restart, whichever is later (the status page reconciles it with outage history). 'Checked' is the age of that check. Uptime covers the dashboard time range.",
+      "description": "One row per configured target. State is the majority verdict of the regions (UP, SLOW, DOWN; PENDING before the first check); last result is the latest check's outcome. Failing regions counts regions that disagree. Budget left is the 30-day error budget remaining. 'In state for' counts from the last up/down change or the agent's last restart, whichever is later (the status page reconciles it with outage history). 'Checked' is the age of that check. Uptime covers the dashboard time range.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -544,7 +540,7 @@
         "x": 0,
         "y": 5,
         "w": 24,
-        "h": 8
+        "h": 14
       },
       "targets": [
         {
@@ -565,7 +561,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (target) (ping_up{target=~\"$target\"})",
+          "expr": "(max by (target) (iyup:target_up:quorum{target=~\"$target\"}) + max by (target) (iyup:target_degraded:quorum{target=~\"$target\"})) or max by (target) (iyup:target_up:quorum{target=~\"$target\"}) or max by (target) (ping_up{target=~\"$target\"})",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -577,7 +573,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (target, reason) (ping_last_result{target=~\"$target\"})",
+          "expr": "topk by (target) (1, count by (target, reason) (ping_last_result{target=~\"$target\"} == 1))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -625,7 +621,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (target) (ping_last_status_code{target=~\"$target\"})",
+          "expr": "min by (target) (ping_last_status_code{target=~\"$target\"})",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -637,7 +633,31 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "avg by (target) (avg_over_time(ping_up{target=~\"$target\"}[$__range]))",
+          "expr": "avg_over_time(iyup:target_up:quorum{target=~\"$target\"}[$__range]) or avg by (target) (avg_over_time(ping_up{target=~\"$target\"}[$__range]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "R",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (target) (iyup:target_regions:count{target=~\"$target\"} - iyup:target_regions_up:count{target=~\"$target\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "S",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "1 - ((1 - avg_over_time(iyup:target_availability:avg5m{target=~\"$target\"}[30d])) * count_over_time(iyup:target_availability:avg5m{target=~\"$target\"}[30d]) * 15) / on (target) ((1 - iyup:target_slo:objective{target=~\"$target\"}) * 2592000)",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -672,11 +692,13 @@
                 "target",
                 "Value #A",
                 "reason",
+                "Value #R",
                 "Value #C",
                 "Value #D",
                 "Value #E",
                 "Value #F",
                 "Value #H",
+                "Value #S",
                 "Value #G"
               ]
             }
@@ -689,22 +711,26 @@
               "target": 0,
               "Value #A": 1,
               "reason": 2,
-              "Value #C": 3,
-              "Value #D": 4,
-              "Value #E": 5,
-              "Value #F": 6,
-              "Value #H": 7,
-              "Value #G": 8
+              "Value #R": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6,
+              "Value #F": 7,
+              "Value #H": 8,
+              "Value #S": 9,
+              "Value #G": 10
             },
             "renameByName": {
               "target": "Target",
               "Value #A": "State",
               "reason": "Last result",
+              "Value #R": "Failing regions",
               "Value #C": "In state for",
               "Value #D": "Checked",
               "Value #E": "Latency",
               "Value #F": "HTTP",
               "Value #H": "Uptime",
+              "Value #S": "Budget left",
               "Value #G": "Cert"
             }
           }
@@ -742,7 +768,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 100
+                "value": 90
               },
               {
                 "id": "custom.cellOptions",
@@ -770,6 +796,11 @@
                         "text": "UP",
                         "color": "#7dbb8b",
                         "index": 1
+                      },
+                      "2": {
+                        "text": "SLOW",
+                        "color": "#e6a23c",
+                        "index": 2
                       }
                     }
                   },
@@ -780,11 +811,95 @@
                       "result": {
                         "text": "PENDING",
                         "color": "#8c88a6",
-                        "index": 2
+                        "index": 3
                       }
                     }
                   }
                 ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failing regions"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    },
+                    {
+                      "color": "#e6a23c",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Budget left"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#e0603b",
+                      "value": null
+                    },
+                    {
+                      "color": "#e6a23c",
+                      "value": 0
+                    },
+                    {
+                      "color": "text",
+                      "value": 0.25
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -796,7 +911,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 160
+                "value": 150
               },
               {
                 "id": "custom.cellOptions",
@@ -842,7 +957,7 @@
               },
               {
                 "id": "custom.width",
-                "value": 150
+                "value": 130
               }
             ]
           },
@@ -1039,7 +1154,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 19,
         "w": 24,
         "h": 1
       },
@@ -1049,14 +1164,14 @@
       "type": "state-timeline",
       "id": 10,
       "title": "Up / down over time",
-      "description": "The agent's verdict per target, after retries. Gaps mean no data (agent down or target not configured yet).",
+      "description": "The majority verdict across regions per target, after retries; SLOW means up but slower than its threshold. Gaps mean no data.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 20,
         "w": 24,
         "h": 7
       },
@@ -1067,8 +1182,97 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (target) (ping_up{target=~\"$target\"})",
+          "expr": "(max by (target) (iyup:target_up:quorum{target=~\"$target\"}) + max by (target) (iyup:target_degraded:quorum{target=~\"$target\"})) or max by (target) (iyup:target_up:quorum{target=~\"$target\"}) or max by (target) (ping_up{target=~\"$target\"})",
           "legendFormat": "{{target}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8c88a6"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "#e0603b",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "#7dbb8b",
+                  "index": 1
+                },
+                "2": {
+                  "text": "SLOW",
+                  "color": "#e6a23c",
+                  "index": 2
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "PENDING",
+                  "color": "#8c88a6",
+                  "index": 3
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "left",
+        "rowHeight": 0.75,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "state-timeline",
+      "id": 11,
+      "title": "By region",
+      "description": "Each region's own verdict. A target failing in one region while the others succeed is a regional problem (TargetRegionalFailure), not an outage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 11
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "label_replace(max by (target, region) (ping_up{target=~\"$target\"}), \"region\", \"default\", \"region\", \"\")",
+          "legendFormat": "{{target}} \u00b7 {{region}}",
           "range": true,
           "instant": false
         }
@@ -1120,12 +1324,215 @@
     },
     {
       "type": "row",
-      "id": 11,
+      "id": 12,
+      "title": "Error budgets",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "bargauge",
+      "id": 13,
+      "title": "Error budget left, 30 days",
+      "description": "Share of each target's 30-day error budget (1 - objective) not yet spent. Young installs have less than 30 days of data; the budget is still the whole window's.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "1 - ((1 - avg_over_time(iyup:target_availability:avg5m{target=~\"$target\"}[30d])) * count_over_time(iyup:target_availability:avg5m{target=~\"$target\"}[30d]) * 15) / on (target) ((1 - iyup:target_slo:objective{target=~\"$target\"}) * 2592000)",
+          "legendFormat": "{{target}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0603b",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 0.25
+              },
+              {
+                "color": "#7dbb8b",
+                "value": 0.5
+              }
+            ]
+          },
+          "noValue": "No objective data yet"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "namePlacement": "left",
+        "sizing": "auto",
+        "minVizHeight": 16,
+        "maxVizHeight": 24,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "Burn rate, 1 hour",
+      "description": "How fast each target spends its error budget: 1 is exactly sustainable for 30 days. ErrorBudgetBurnFast pages above 14.4 (with the 5-minute window agreeing).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 39,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "iyup:target_error_ratio:rate1h{target=~\"$target\"} / on (target) (1 - iyup:target_slo:objective{target=~\"$target\"})",
+          "legendFormat": "{{target}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "vector(14.4)",
+          "legendFormat": "page threshold",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "x",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisBorderShow": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          },
+          "decimals": 1,
+          "min": 0.1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "page threshold"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e0603b"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 15,
       "title": "Latency",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 21,
+        "y": 49,
         "w": 24,
         "h": 1
       },
@@ -1133,7 +1540,7 @@
     },
     {
       "type": "timeseries",
-      "id": 12,
+      "id": 16,
       "title": "p95 response latency",
       "description": "95th percentile latency of checks that received an HTTP response, over a rolling 5 minute window. Failed connections are excluded so they cannot make a dead target look fast.",
       "datasource": {
@@ -1142,7 +1549,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -1200,7 +1607,7 @@
     },
     {
       "type": "barchart",
-      "id": 13,
+      "id": 17,
       "title": "Where the latest check's time went",
       "description": "Connection phases of each target's latest check. 'Server' is the remainder: time from an open connection to the response headers. Keep-alives are off, so every check pays the full DNS + TCP + TLS cost.",
       "datasource": {
@@ -1209,7 +1616,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 22,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -1401,12 +1808,12 @@
     },
     {
       "type": "row",
-      "id": 14,
+      "id": 18,
       "title": "Early warnings",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 58,
         "w": 24,
         "h": 1
       },
@@ -1414,7 +1821,7 @@
     },
     {
       "type": "timeseries",
-      "id": 15,
+      "id": 19,
       "title": "Retries per hour",
       "description": "Attempts the agent had to retry, as an hourly rate over 5 minutes. A target that stays up but keeps needing retries is degrading before it goes down.",
       "datasource": {
@@ -1423,7 +1830,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 59,
         "w": 12,
         "h": 7
       },
@@ -1479,7 +1886,7 @@
     },
     {
       "type": "stat",
-      "id": 16,
+      "id": 20,
       "title": "TLS certificate days left",
       "description": "From each HTTPS target's latest check. CertificateExpiringSoon fires below 14 days; negative means expired.",
       "datasource": {
@@ -1488,8 +1895,8 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 31,
-        "w": 12,
+        "y": 59,
+        "w": 6,
         "h": 7
       },
       "targets": [
@@ -1552,13 +1959,87 @@
       }
     },
     {
+      "type": "stat",
+      "id": 21,
+      "title": "Domain registration days left",
+      "description": "From RDAP, refreshed twice a day for the domains listed in the targets file. DomainExpiringSoon fires below 30 days.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 59,
+        "w": 6,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "min by (domain) (ping_domain_expiry_days)",
+          "legendFormat": "{{domain}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: days",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0603b",
+                "value": null
+              },
+              {
+                "color": "#e6a23c",
+                "value": 14
+              },
+              {
+                "color": "#7dbb8b",
+                "value": 30
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0,
+          "noValue": "No domains configured"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
       "type": "row",
-      "id": 17,
+      "id": 22,
       "title": "Monitoring pipeline",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 66,
         "w": 24,
         "h": 1
       },
@@ -1566,16 +2047,16 @@
     },
     {
       "type": "stat",
-      "id": 18,
-      "title": "ping-agent",
-      "description": "Can Prometheus scrape the ping-agent? If not, nothing is being checked (PingAgentDown).",
+      "id": 23,
+      "title": "ping-agents up",
+      "description": "Agents (regions) Prometheus can scrape. With none, nothing is checked (AllPingAgentsDown); with fewer, the quorum rests on fewer votes.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 67,
         "w": 6,
         "h": 4
       },
@@ -1586,7 +2067,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(up{job=\"ping-agent\"})",
+          "expr": "sum(up{job=\"ping-agent\"})",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -1611,24 +2092,8 @@
               }
             ]
           },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "DOWN",
-                  "color": "#e0603b",
-                  "index": 0
-                },
-                "1": {
-                  "text": "UP",
-                  "color": "#7dbb8b",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "noValue": "NOT SCRAPED"
+          "mappings": [],
+          "noValue": "NONE"
         },
         "overrides": []
       },
@@ -1651,7 +2116,7 @@
     },
     {
       "type": "stat",
-      "id": 19,
+      "id": 24,
       "title": "api-gateway",
       "description": "Can Prometheus scrape the status API? If not, the status page is down (ApiGatewayDown).",
       "datasource": {
@@ -1660,7 +2125,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 39,
+        "y": 67,
         "w": 6,
         "h": 4
       },
@@ -1736,16 +2201,16 @@
     },
     {
       "type": "stat",
-      "id": 20,
-      "title": "Check interval",
-      "description": "PING_INTERVAL_SECONDS as reported by the agent.",
+      "id": 25,
+      "title": "Shortest interval",
+      "description": "The most frequent check interval among the targets.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 71,
         "w": 6,
         "h": 4
       },
@@ -1756,7 +2221,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(ping_interval_seconds)",
+          "expr": "min(ping_interval_seconds)",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -1801,16 +2266,16 @@
     },
     {
       "type": "stat",
-      "id": 21,
-      "title": "Stale after",
-      "description": "Checks older than this are treated as unknown: two intervals plus one worst-case check (all retries timing out).",
+      "id": 26,
+      "title": "Longest stale budget",
+      "description": "The largest staleness budget among the targets: two intervals plus one worst-case check (all retries timing out).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 6,
-        "y": 43,
+        "y": 71,
         "w": 6,
         "h": 4
       },
@@ -1866,7 +2331,7 @@
     },
     {
       "type": "timeseries",
-      "id": 22,
+      "id": 27,
       "title": "Age of each target's last check",
       "description": "A healthy agent draws a sawtooth that resets every interval. A line climbing through the dashed limit means checks have stopped finishing.",
       "datasource": {
@@ -1875,7 +2340,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 39,
+        "y": 67,
         "w": 12,
         "h": 8
       },
@@ -1974,7 +2439,7 @@
     },
     {
       "type": "timeseries",
-      "id": 23,
+      "id": 28,
       "title": "Status API requests",
       "description": "Requests to the api-gateway by route template and status code.",
       "datasource": {
@@ -1983,7 +2448,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 75,
         "w": 12,
         "h": 7
       },
@@ -2037,7 +2502,7 @@
     },
     {
       "type": "timeseries",
-      "id": 24,
+      "id": 29,
       "title": "Status API p95 latency",
       "description": "How long the api-gateway takes to answer, by route. /history and /outages query Prometheus and are cached for PROMETHEUS_QUERY_CACHE_SECONDS.",
       "datasource": {
@@ -2046,7 +2511,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 47,
+        "y": 75,
         "w": 12,
         "h": 7
       },
