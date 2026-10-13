@@ -100,6 +100,20 @@ jobs:
         run: |
           docker run --rm -v "$PWD/config:/c:ro" --entrypoint promtool prom/prometheus:v2.54.1 \
             test rules /c/alert.rules.test.yml
+      - name: Alert rule unit tests in every group order
+        # Prometheus evaluates rule groups independently, so no test may
+        # depend on which group runs first.
+        run: |
+          mkdir -p /tmp/order && cp config/alert.rules.yml /tmp/order/
+          for order in \
+            "iyup-recording, iyup-targets, iyup-pipeline" "iyup-recording, iyup-pipeline, iyup-targets" \
+            "iyup-targets, iyup-recording, iyup-pipeline" "iyup-targets, iyup-pipeline, iyup-recording" \
+            "iyup-pipeline, iyup-recording, iyup-targets" "iyup-pipeline, iyup-targets, iyup-recording"; do
+            sed "s/^evaluation_interval: 15s$/&\ngroup_eval_order: [$order]/" config/alert.rules.test.yml > /tmp/order/test.yml
+            grep -q "^group_eval_order: \[$order\]$" /tmp/order/test.yml
+            echo "group order: $order"
+            docker run --rm -v /tmp/order:/c:ro --entrypoint promtool prom/prometheus:v2.54.1 test rules /c/test.yml
+          done
       - name: Alertmanager config
         run: |
           docker run --rm -v "$PWD/config:/c:ro" --entrypoint amtool prom/alertmanager:v0.27.0 \

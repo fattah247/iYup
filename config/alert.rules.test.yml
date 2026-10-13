@@ -50,7 +50,9 @@ tests:
               summary: "https://down.example is down"
               description: "Checks of https://down.example have failed for at least a minute, after retries. Latest reason: timeout."
               runbook: docs/OPERATIONS_RUNBOOK.md#targetdown
-      - eval_time: 6m15s
+      # One evaluation after recovery: rule groups run independently, so an
+      # alert can read the quorum recorded one interval earlier.
+      - eval_time: 6m30s
         alertname: TargetDown
         exp_alerts: []
 
