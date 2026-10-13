@@ -1,8 +1,11 @@
-"""Prometheus-backed views over time: windowed uptime, history buckets and
-outages.
+"""Prometheus-backed views over time: windowed uptime, history buckets,
+outages and error budgets.
 
-All history is derived from ``ping_up``, the agent's post-retry verdict, so a
-blip that a retry absorbed never shows up as downtime here.
+History is derived from the region-quorum verdict the recording rules publish
+(iyup:target_up:quorum), which itself comes from the agents' post-retry
+verdicts, so a blip a retry absorbed, or a failure seen from only a minority
+of regions, never counts as downtime. Without the recording rules the queries
+fall back to raw ping_up.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 # Prometheus refuses range queries returning more than 11,000 points per series.
 MAX_POINTS = 10_000
+RULE_INTERVAL_SECONDS = 15  # evaluation interval of the iyup-recording group
 MIN_STEP_SECONDS = 15  # the scrape interval; finer steps only repeat samples
 # Missing data this short, with the target down on both sides, is an agent
 # restart rather than a recovery: the same tolerance TargetDown uses.
@@ -191,12 +195,8 @@ def availability_history(
     end = math.ceil(now / step) * step
     first = end - (buckets - 1) * step
 
-    series = matrix_by_target(
-        api.range(f"avg by (target) (avg_over_time(ping_up[{step}s]))", first, end, step)
-    )
-    overall = vector_by_target(
-        api.instant(f"avg by (target) (avg_over_time(ping_up[{window_seconds}s]))", at=now)
-    )
+    series = matrix_by_target(api.range(_up_ratio(step), first, end, step))
+    overall = vector_by_target(api.instant(_up_ratio(window_seconds), at=now))
     p95 = vector_by_target(
         api.instant(
             "histogram_quantile(0.95, sum by (target, le) "
@@ -241,8 +241,19 @@ def find_outages(api: PrometheusAPI, targets: list[str], window_seconds: int, no
     step = max(MIN_STEP_SECONDS, math.ceil(window_seconds / MAX_POINTS))
     end = math.floor(now / step) * step
     start = end - window_seconds
+    # Without the recording rules, apply the same majority rule to the raw
+    # per-region results: up when at least half the regions saw no failure.
+    raw = (
+        f"sum by (target) (min_over_time(ping_up[{step}s])) * 2"
+        f" >= bool count by (target) (min_over_time(ping_up[{step}s]))"
+    )
     series = matrix_by_target(
-        api.range(f"min by (target) (min_over_time(ping_up[{step}s]))", start + step, end, step)
+        api.range(
+            f"min_over_time(iyup:target_up:quorum[{step}s]) or {_without_quorum(raw, step)}",
+            start + step,
+            end,
+            step,
+        )
     )
 
     outages: list[dict[str, Any]] = []
@@ -292,6 +303,74 @@ def _runs_of_downtime(
     if run_start is not None:
         close(ongoing=run_end == last)
     return runs
+
+
+def _up_ratio(seconds: int) -> str:
+    raw = f"avg by (target) (avg_over_time(ping_up[{seconds}s]))"
+    return f"avg_over_time(iyup:target_up:quorum[{seconds}s]) or {_without_quorum(raw, seconds)}"
+
+
+def _without_quorum(raw: str, seconds: int) -> str:
+    """Let raw per-agent data stand in only where the quorum recording rule has
+    produced nothing for a while: before the rules existed (an upgrade, or a
+    Prometheus without them). A single step that merely missed a quorum sample
+    (rule evaluation jitter) stays a gap instead; falling back there turned a
+    failure seen from one region into a 15-second outage."""
+    return f"({raw} unless on (target) count_over_time(iyup:target_up:quorum[{max(seconds, 300)}s]))"
+
+
+def slo_report(api: PrometheusAPI, targets: list[str], window_seconds: int, now: float) -> dict[str, Any]:
+    """Error budget per target over a rolling window.
+
+    The budget is (1 - objective) of the whole window. Downtime is what the
+    quorum series actually saw, and coverage says how much of the window has
+    data, so a young install reports "based on 2 days" rather than pretending
+    to know 30.
+    """
+    w = f"{window_seconds}s"
+    objective = vector_by_target(
+        api.instant("iyup:target_slo:objective or max by (target) (ping_slo_objective_ratio)", at=now)
+    )
+    availability = vector_by_target(
+        api.instant(
+            f"avg_over_time(iyup:target_availability:avg5m[{w}]) or avg by (target) (avg_over_time(ping_up[{w}]))",
+            at=now,
+        )
+    )
+    samples = vector_by_target(api.instant(f"count_over_time(iyup:target_up:quorum[{w}])", at=now))
+    burn_1h = vector_by_target(api.instant("iyup:target_error_ratio:rate1h", at=now))
+    burn_6h = vector_by_target(api.instant("iyup:target_error_ratio:rate6h", at=now))
+
+    rows = []
+    for target in _ordered_targets(targets, objective, availability):
+        obj = objective.get(target)
+        avail = availability.get(target)
+        covered = min(window_seconds, samples.get(target, 0.0) * RULE_INTERVAL_SECONDS)
+        row: dict[str, Any] = {
+            "url": target,
+            "objective": round(obj * 100, 4) if obj is not None else None,
+            "availability": _pct(avail),
+            "coverage_seconds": int(covered),
+            "allowed_downtime_seconds": None,
+            "downtime_seconds": None,
+            "budget_remaining": None,
+            "burn_rate_1h": None,
+            "burn_rate_6h": None,
+        }
+        if obj is not None and obj < 1:
+            budget = 1 - obj
+            allowed = budget * window_seconds
+            row["allowed_downtime_seconds"] = int(round(allowed))
+            if avail is not None:
+                used = (1 - avail) * (covered or window_seconds)
+                row["downtime_seconds"] = int(round(used))
+                row["budget_remaining"] = round((1 - used / allowed) * 100, 2)
+            if target in burn_1h:
+                row["burn_rate_1h"] = round(burn_1h[target] / budget, 2)
+            if target in burn_6h:
+                row["burn_rate_6h"] = round(burn_6h[target] / budget, 2)
+        rows.append(row)
+    return {"window_seconds": window_seconds, "targets": rows}
 
 
 def _pct(fraction: float | None) -> float | None:

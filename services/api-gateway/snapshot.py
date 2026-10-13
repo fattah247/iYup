@@ -1,9 +1,9 @@
-"""Turn the ping-agent's /metrics exposition into per-target status.
+"""Turn ping-agent /metrics expositions into per-target status.
 
-The agent is the source of truth for "right now": which targets exist, the
-outcome of each target's latest check, and how fresh that outcome is. This
-module never invents a verdict: a target with no data, or with data older than
-the agent's own staleness budget, is reported as ``unknown`` rather than down.
+The agents are the source of truth for "right now". Each agent is a region; a
+target's state is decided by majority across the regions with fresh data, the
+same rule the alerts use. Nothing here invents a verdict: a target with no
+data, or with data older than the agent's own staleness budget, is unknown.
 """
 
 from __future__ import annotations
@@ -18,9 +18,11 @@ from prometheus_client.parser import text_string_to_metric_families
 STATE_UP = "up"
 STATE_DOWN = "down"
 STATE_UNKNOWN = "unknown"
+DEFAULT_REGION = "default"
 
 _GAUGES = {
     "ping_up": "up",
+    "ping_degraded": "degraded",
     "ping_last_latency_seconds": "last_latency",
     "ping_last_status_code": "status_code",
     "ping_last_check_timestamp_seconds": "last_check",
@@ -29,6 +31,10 @@ _GAUGES = {
     "ping_dns_duration_seconds": "dns",
     "ping_connect_duration_seconds": "connect",
     "ping_tls_duration_seconds": "tls",
+    "ping_interval_seconds": "interval",
+    "ping_stale_after_seconds": "stale_after",
+    "ping_degraded_threshold_seconds": "degraded_threshold",
+    "ping_slo_objective_ratio": "slo",
 }
 _COUNTERS = {
     "ping_success_total": "success",
@@ -44,6 +50,7 @@ class MetricsFormatError(ValueError):
 @dataclass
 class TargetMetrics:
     up: float | None = None
+    degraded: float | None = None
     success: float = 0.0
     failures: float = 0.0
     retries: float = 0.0
@@ -56,26 +63,28 @@ class TargetMetrics:
     dns: float | None = None
     connect: float | None = None
     tls: float | None = None
+    interval: float | None = None
+    stale_after: float | None = None
+    degraded_threshold: float | None = None
+    slo: float | None = None
     buckets: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
 class AgentSnapshot:
+    region: str = DEFAULT_REGION
     targets: dict[str, TargetMetrics] = field(default_factory=dict)
-    configured: list[str] = field(default_factory=list)
+    configured: dict[str, dict[str, str]] = field(default_factory=dict)  # target -> {name, kind}
+    # Agent-wide values from agents that predate per-target settings.
     interval_seconds: float | None = None
     stale_after_seconds: float | None = None
-    region: str | None = None
 
     def target_urls(self) -> list[str]:
-        """Targets the agent checks; older agents without ping_target_info
-        are described by whichever targets have data."""
-        return self.configured or sorted(self.targets)
+        return list(self.configured) or list(self.targets)
 
 
 def parse_agent_metrics(text: str) -> AgentSnapshot:
     snapshot = AgentSnapshot()
-    configured: set[str] = set()
     try:
         families = list(text_string_to_metric_families(text))
     except ValueError as exc:
@@ -84,20 +93,17 @@ def parse_agent_metrics(text: str) -> AgentSnapshot:
     for family in families:
         for sample in family.samples:
             name, labels, value = sample.name, sample.labels, sample.value
-            if snapshot.region is None and labels.get("region"):
+            if labels.get("region"):
                 snapshot.region = labels["region"]
-            if name == "ping_interval_seconds":
-                snapshot.interval_seconds = value
-                continue
-            if name == "ping_stale_after_seconds":
-                snapshot.stale_after_seconds = value
-                continue
-
             target = labels.get("target")
             if not target:
+                if name == "ping_interval_seconds":
+                    snapshot.interval_seconds = value
+                elif name == "ping_stale_after_seconds":
+                    snapshot.stale_after_seconds = value
                 continue
             if name == "ping_target_info":
-                configured.add(target)
+                snapshot.configured[target] = {"name": labels.get("name", ""), "kind": labels.get("kind", "")}
                 continue
 
             metrics = snapshot.targets.setdefault(target, TargetMetrics())
@@ -118,7 +124,6 @@ def parse_agent_metrics(text: str) -> AgentSnapshot:
 
     for metrics in snapshot.targets.values():
         metrics.buckets.sort(key=lambda bucket: bucket[0])
-    snapshot.configured = sorted(configured)
     return snapshot
 
 
@@ -145,6 +150,19 @@ def percentile_from_histogram(buckets: list[tuple[float, float]], quantile: floa
     return finite[-1] if finite else None
 
 
+def merge_buckets(bucket_lists: list[list[tuple[float, float]]]) -> list[tuple[float, float]]:
+    totals: dict[float, float] = {}
+    for buckets in bucket_lists:
+        for le, count in buckets:
+            totals[le] = totals.get(le, 0.0) + count
+    return sorted(totals.items())
+
+
+def infer_kind(url: str) -> str:
+    scheme = urlsplit(url).scheme
+    return {"tcp": "tcp", "tls": "tcp", "dns": "dns"}.get(scheme, "http")
+
+
 def display_name(url: str) -> str:
     parts = urlsplit(url)
     path = parts.path.rstrip("/")
@@ -168,60 +186,134 @@ def availability_percent(success: float, failures: float) -> float | None:
     return (success / total) * 100 if total > 0 else None
 
 
-def target_status(url: str, snapshot: AgentSnapshot, now: float) -> dict[str, object]:
+def region_status(url: str, snapshot: AgentSnapshot, now: float) -> dict[str, object] | None:
+    """One agent's view of one target, or None if that agent does not know it."""
     metrics = snapshot.targets.get(url)
-    known_to_agent = url in snapshot.configured or metrics is not None
+    if metrics is None and url not in snapshot.configured:
+        return None
     m = metrics or TargetMetrics()
-
+    stale_after = m.stale_after if m.stale_after is not None else snapshot.stale_after_seconds
     age = now - m.last_check if m.last_check is not None else None
-    stale = (
-        age is not None
-        and snapshot.stale_after_seconds is not None
-        and age > snapshot.stale_after_seconds
-    )
+    stale = age is not None and stale_after is not None and age > stale_after
     if m.up is None:
-        state = STATE_UNKNOWN
-        reason = "pending" if known_to_agent else "not_monitored"
+        state, reason = STATE_UNKNOWN, "pending"
     elif stale:
-        state = STATE_UNKNOWN
-        reason = m.reason
+        state, reason = STATE_UNKNOWN, m.reason
     else:
-        state = STATE_UP if m.up == 1 else STATE_DOWN
-        reason = m.reason
-
-    availability = availability_percent(m.success, m.failures)
+        state, reason = (STATE_UP if m.up == 1 else STATE_DOWN), m.reason
     return {
-        "url": url,
-        "name": display_name(url),
+        "region": snapshot.region,
         "state": state,
-        "up": state == STATE_UP,
         "reason": reason,
+        "slow": state == STATE_UP and m.degraded == 1,
         "stale": stale,
         "http_status": int(m.status_code) if m.status_code is not None else None,
+        "latency_ms": _ms(m.last_latency, 1),
         "last_checked_at": iso(m.last_check),
         "last_checked_seconds_ago": round(age, 1) if age is not None else None,
+        "_metrics": m,
+    }
+
+
+def target_status(url: str, snapshots: list[AgentSnapshot], now: float) -> dict[str, object]:
+    regions = [r for r in (region_status(url, s, now) for s in snapshots) if r is not None]
+    info = next((s.configured[url] for s in snapshots if url in s.configured), {})
+    fresh = [r for r in regions if r["state"] != STATE_UNKNOWN]
+    down = [r for r in fresh if r["state"] == STATE_DOWN]
+    up = [r for r in fresh if r["state"] == STATE_UP]
+
+    if not regions:
+        state, reason, rep = STATE_UNKNOWN, "not_monitored", None
+    elif not fresh:
+        rep = regions[0]
+        state, reason = STATE_UNKNOWN, rep["reason"]
+    elif len(down) * 2 > len(fresh):
+        rep = down[0]
+        reasons = [r["reason"] for r in down]
+        state, reason = STATE_DOWN, max(set(reasons), key=reasons.count)
+    else:
+        # The representative up region is the one with the median latency.
+        rep = sorted(up, key=lambda r: r["latency_ms"] if r["latency_ms"] is not None else math.inf)[(len(up) - 1) // 2]
+        state, reason = STATE_UP, rep["reason"]
+    slow = state == STATE_UP and sum(1 for r in up if r["slow"]) * 2 > len(up)
+
+    all_metrics: list[TargetMetrics] = [r["_metrics"] for r in regions]
+    m: TargetMetrics = rep["_metrics"] if rep else TargetMetrics()
+    success = sum(x.success for x in all_metrics)
+    failures = sum(x.failures for x in all_metrics)
+    buckets = merge_buckets([x.buckets for x in all_metrics])
+    availability = availability_percent(success, failures)
+    expiries = [x.cert_expiry_days for x in all_metrics if x.cert_expiry_days is not None]
+    intervals = [x.interval for x in all_metrics if x.interval is not None]
+    stale_afters = [x.stale_after for x in all_metrics if x.stale_after is not None]
+    thresholds = [x.degraded_threshold for x in all_metrics if x.degraded_threshold is not None]
+    slos = [x.slo for x in all_metrics if x.slo is not None]
+    stale = bool(regions) and not fresh and any(r["stale"] for r in regions)
+
+    return {
+        "url": url,
+        "name": info.get("name") or display_name(url),
+        "kind": info.get("kind") or infer_kind(url),
+        "state": state,
+        "up": state == STATE_UP,
+        "slow": slow,
+        "reason": reason,
+        "stale": stale,
+        "http_status": rep["http_status"] if rep else None,
+        "last_checked_at": iso(max((x.last_check for x in all_metrics if x.last_check is not None), default=None)),
+        "last_checked_seconds_ago": min(
+            (r["last_checked_seconds_ago"] for r in regions if r["last_checked_seconds_ago"] is not None), default=None
+        ),
         "state_since": iso(m.state_change) if state != STATE_UNKNOWN else None,
-        "latency_ms": _ms(m.last_latency, 1),
+        "latency_ms": rep["latency_ms"] if rep else None,
         "latency_percentiles_ms": {
-            name: _ms(percentile_from_histogram(m.buckets, q), 1)
+            name: _ms(percentile_from_histogram(buckets, q), 1)
             for name, q in (("p50", 0.50), ("p95", 0.95), ("p99", 0.99))
         },
         "connection_ms": {"dns": _ms(m.dns), "tcp": _ms(m.connect), "tls": _ms(m.tls)},
         "availability": round(availability, 2) if availability is not None else None,
-        "total_checks": int(m.success + m.failures),
-        "success": int(m.success),
-        "failures": int(m.failures),
-        "retries": int(m.retries),
-        "ssl_cert_expiry_days": round(m.cert_expiry_days, 1) if m.cert_expiry_days is not None else None,
+        "total_checks": int(success + failures),
+        "success": int(success),
+        "failures": int(failures),
+        "retries": int(sum(x.retries for x in all_metrics)),
+        "ssl_cert_expiry_days": round(min(expiries), 1) if expiries else None,
+        "interval_seconds": max(intervals) if intervals else None,
+        "stale_after_seconds": max(stale_afters) if stale_afters else None,
+        "slow_threshold_ms": _ms(max(thresholds), 0) if thresholds else None,
+        "slo_objective": round(max(slos) * 100, 4) if slos else None,
+        "regions_total": len(fresh),
+        "regions_failing": len(down),
+        "regions": [{k: v for k, v in r.items() if k != "_metrics"} for r in regions],
+        "maintenance": None,
     }
 
 
-def overall_status(states: list[str]) -> str:
-    """Worst known state wins, and we only vouch for what we can see:
-    any unknown target keeps the summary from claiming "operational"."""
+def overall_status(rows: list[dict[str, object]]) -> str:
+    """Worst known state wins, and we only vouch for what we can see.
+    Targets in an active maintenance window are set aside."""
+    considered = [r for r in rows if not (r.get("maintenance") or {}).get("active")]
+    if rows and not considered:
+        return "maintenance"
+    states = [r["state"] for r in considered]
     down = states.count(STATE_DOWN)
     if down:
         return "outage" if down == len(states) else "degraded"
     if not states or STATE_UNKNOWN in states:
         return "unknown"
+    if any(r.get("slow") for r in considered):
+        return "degraded"
     return "operational"
+
+
+def summarize(rows: list[dict[str, object]]) -> dict[str, int]:
+    in_maintenance = [r for r in rows if (r.get("maintenance") or {}).get("active")]
+    others = [r for r in rows if r not in in_maintenance]
+    states = [r["state"] for r in others]
+    return {
+        "up": states.count(STATE_UP),
+        "down": states.count(STATE_DOWN),
+        "unknown": states.count(STATE_UNKNOWN),
+        "slow": sum(1 for r in others if r.get("slow")),
+        "maintenance": len(in_maintenance),
+        "total": len(rows),
+    }

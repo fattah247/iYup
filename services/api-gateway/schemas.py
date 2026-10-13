@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 State = Literal["up", "down", "unknown"]
-Overall = Literal["operational", "degraded", "outage", "unknown"]
+Overall = Literal["operational", "degraded", "outage", "unknown", "maintenance"]
 
 
 class Percentiles(BaseModel):
@@ -23,18 +23,42 @@ class ConnectionPhases(BaseModel):
     tls: float | None = Field(description="TLS handshake of the latest check, ms")
 
 
+class RegionStatus(BaseModel):
+    region: str = Field(description="The agent's PING_REGION, or 'default' for a single unnamed agent")
+    state: State
+    reason: str | None
+    slow: bool
+    stale: bool
+    http_status: int | None
+    latency_ms: float | None
+    last_checked_at: str | None
+    last_checked_seconds_ago: float | None
+
+
+class Maintenance(BaseModel):
+    active: bool = Field(description="False for an upcoming window")
+    starts_at: str
+    ends_at: str
+    comment: str
+
+
 class TargetStatus(BaseModel):
-    url: str
-    name: str = Field(description="Host and path, for display")
+    url: str = Field(description="The target's id: its URL, tcp:// or tls:// address, or dns://host/RECORD")
+    name: str = Field(description="Configured name, or host and path")
+    kind: Literal["http", "tcp", "dns"]
     state: State = Field(
-        description="up/down from the latest check; unknown when there is no data yet or it is stale"
+        description=(
+            "Majority verdict of the regions with fresh data: down when more than half see it down; "
+            "unknown when no region has fresh data"
+        )
     )
     up: bool = Field(description="Shorthand for state == 'up'")
+    slow: bool = Field(description="Up, but most regions see it slower than its degraded_after threshold")
     reason: str | None = Field(
         description=(
-            "Outcome of the latest check: ok, http_4xx, http_5xx, timeout, dns, connection_refused, "
-            "tls, network, error; 'pending' before the first check; 'not_monitored' if the agent "
-            "does not check this URL"
+            "Outcome of the latest check: ok, http_4xx, http_5xx, unexpected_status, body_mismatch, "
+            "unexpected_answer, timeout, dns, connection_refused, tls, network, error; 'pending' before "
+            "the first check; 'not_monitored' if no agent checks this target"
         )
     )
     stale: bool = Field(description="True when the latest check is older than the agent's staleness budget")
@@ -55,31 +79,52 @@ class TargetStatus(BaseModel):
     failures: int
     retries: int = Field(description="Retry attempts since the agent started; steady growth means flaky")
     ssl_cert_expiry_days: float | None = Field(description="Negative once the certificate has expired")
+    interval_seconds: float | None
+    stale_after_seconds: float | None
+    slow_threshold_ms: float | None
+    slo_objective: float | None = Field(description="Availability objective in percent, e.g. 99.9")
+    regions_total: int = Field(description="Regions with fresh data for this target")
+    regions_failing: int
+    regions: list[RegionStatus]
+    maintenance: Maintenance | None = Field(description="Active or next planned maintenance window")
 
 
 class Summary(BaseModel):
     up: int
     down: int
     unknown: int
+    slow: int
+    maintenance: int = Field(description="Targets in an active maintenance window, counted apart from the rest")
     total: int
 
 
-class MonitorInfo(BaseModel):
-    interval_seconds: float | None
-    stale_after_seconds: float | None
+class AgentHealth(BaseModel):
     region: str | None
+    reachable: bool
+
+
+class MonitorInfo(BaseModel):
+    interval_seconds: float | None = Field(description="Shortest check interval among the targets")
+    agents: list[AgentHealth]
+    alertmanager: Literal["reachable", "unreachable", "not_configured"]
+
+
+class MaintenanceWindow(Maintenance):
+    targets: list[str] = Field(description="Names of the targets in this window")
 
 
 class StatusResponse(BaseModel):
     status: Overall = Field(
         description=(
-            "outage: every target is down; degraded: some are down; unknown: none are down but at least "
-            "one has no fresh data; operational: every target is up"
+            "outage: every target is down; degraded: some are down or slow; unknown: none are down but at "
+            "least one has no fresh data; maintenance: every target is in a maintenance window; "
+            "operational: every target is up. Targets in active maintenance are set aside."
         )
     )
     summary: Summary
     generated_at: str
     monitor: MonitorInfo
+    maintenance: list[MaintenanceWindow]
     targets: list[TargetStatus]
 
 
@@ -156,3 +201,21 @@ class OutagesResponse(BaseModel):
     truncated: bool
     by_target: list[OutageTotals]
     outages: list[Outage]
+
+
+class SLOTarget(BaseModel):
+    url: str
+    name: str
+    objective: float | None = Field(description="Objective in percent")
+    availability: float | None = Field(description="Percent of time up (region quorum) over the covered part of the window")
+    coverage_seconds: int = Field(description="How much of the window has data; budgets on young installs are partial")
+    allowed_downtime_seconds: int | None = Field(description="The error budget for the whole window")
+    downtime_seconds: int | None
+    budget_remaining: float | None = Field(description="Percent of the error budget left; negative once overspent")
+    burn_rate_1h: float | None = Field(description="1 means spending the budget exactly as fast as it accrues")
+    burn_rate_6h: float | None
+
+
+class SLOResponse(BaseModel):
+    window: str
+    targets: list[SLOTarget]
