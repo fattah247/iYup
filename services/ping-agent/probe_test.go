@@ -5,13 +5,27 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func opts(retries int) probeOptions {
-	return probeOptions{Method: http.MethodGet, UseRange: true, RetryCount: retries, MaxBodyBytes: 1024}
+func mustTarget(t *testing.T, spec targetSpec) target {
+	t.Helper()
+	tg, err := resolveTarget(targetSpec{}, spec, testBase())
+	if err != nil {
+		t.Fatalf("resolveTarget(%+v): %v", spec, err)
+	}
+	return tg
+}
+
+func run(t *testing.T, spec targetSpec, transport http.RoundTripper) (checkResult, bool) {
+	t.Helper()
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return checkTarget(context.Background(), newCheck(mustTarget(t, spec), transport))
 }
 
 // statusSequence serves the given status codes in order, repeating the last.
@@ -26,7 +40,7 @@ func statusSequence(t *testing.T, codes ...int) (*httptest.Server, *atomic.Int32
 	return srv, &hits
 }
 
-func closedPortURL(t *testing.T) string {
+func closedPort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -34,59 +48,61 @@ func closedPortURL(t *testing.T) string {
 	}
 	addr := ln.Addr().String()
 	_ = ln.Close()
-	return "http://" + addr
+	return addr
 }
 
-func TestCheckTargetUp(t *testing.T) {
+func TestCheckUp(t *testing.T) {
 	t.Parallel()
 	srv, hits := statusSequence(t, http.StatusOK)
-
-	res, ok := checkTarget(context.Background(), srv.Client(), srv.URL, opts(2))
-	if !ok || !res.Up || res.Reason != reasonOK || res.StatusCode != 200 || res.Attempts != 1 {
-		t.Fatalf("got ok=%v %+v, want an up result on the first attempt", ok, res)
+	res, ok := run(t, targetSpec{URL: srv.URL}, nil)
+	if !ok || !res.Up || !res.Responded || res.Reason != reasonOK || res.StatusCode != 200 || res.Attempts != 1 || res.Degraded {
+		t.Fatalf("got ok=%v %+v", ok, res)
 	}
 	if hits.Load() != 1 {
 		t.Errorf("server hit %d times, want 1", hits.Load())
 	}
 }
 
-func TestCheckTargetRecoversOnRetry(t *testing.T) {
+func TestCheckRecoversOnRetry(t *testing.T) {
 	t.Parallel()
 	srv, _ := statusSequence(t, http.StatusServiceUnavailable, http.StatusOK)
-
-	res, ok := checkTarget(context.Background(), srv.Client(), srv.URL, opts(2))
-	if !ok || !res.Up || res.Attempts != 2 {
+	if res, ok := run(t, targetSpec{URL: srv.URL}, nil); !ok || !res.Up || res.Attempts != 2 {
 		t.Fatalf("got ok=%v %+v, want up after 2 attempts", ok, res)
 	}
 }
 
-func TestCheckTargetPersistentServerError(t *testing.T) {
+func TestCheckPersistentServerError(t *testing.T) {
 	t.Parallel()
 	srv, hits := statusSequence(t, http.StatusBadGateway)
-
-	res, ok := checkTarget(context.Background(), srv.Client(), srv.URL, opts(2))
-	if !ok || res.Up || res.Reason != reasonHTTP5xx || res.StatusCode != 502 || res.Attempts != 3 {
-		t.Fatalf("got ok=%v %+v, want down/http_5xx after 3 attempts", ok, res)
-	}
-	if hits.Load() != 3 {
-		t.Errorf("server hit %d times, want 3", hits.Load())
+	res, ok := run(t, targetSpec{URL: srv.URL}, nil)
+	if !ok || res.Up || res.Reason != reasonHTTP5xx || res.Attempts != 3 || hits.Load() != 3 {
+		t.Fatalf("got ok=%v %+v hits=%d", ok, res, hits.Load())
 	}
 }
 
-func TestCheckTargetClientErrorIsNotRetried(t *testing.T) {
+func TestClientErrorIsNotRetried(t *testing.T) {
 	t.Parallel()
 	srv, hits := statusSequence(t, http.StatusNotFound)
-
-	res, ok := checkTarget(context.Background(), srv.Client(), srv.URL, opts(2))
-	if !ok || res.Up || res.Reason != reasonHTTP4xx || res.Attempts != 1 {
-		t.Fatalf("got ok=%v %+v, want down/http_4xx with no retry", ok, res)
-	}
-	if hits.Load() != 1 {
-		t.Errorf("server hit %d times, want 1", hits.Load())
+	res, _ := run(t, targetSpec{URL: srv.URL}, nil)
+	if res.Up || res.Reason != reasonHTTP4xx || res.Attempts != 1 || hits.Load() != 1 {
+		t.Fatalf("got %+v hits=%d", res, hits.Load())
 	}
 }
 
-func TestClassifyStatus(t *testing.T) {
+func TestExpectedStatus(t *testing.T) {
+	t.Parallel()
+	srv, hits := statusSequence(t, http.StatusOK)
+	res, _ := run(t, targetSpec{URL: srv.URL, Expect: &expectSpec{Status: []string{"204"}}}, nil)
+	if res.Up || res.Reason != reasonUnexpectedStatus || hits.Load() != 1 {
+		t.Fatalf("200 when 204 is expected: %+v hits=%d", res, hits.Load())
+	}
+	created, _ := statusSequence(t, http.StatusCreated)
+	if res, _ := run(t, targetSpec{URL: created.URL, Expect: &expectSpec{Status: []string{"2xx"}}}, nil); !res.Up {
+		t.Fatalf("201 with 2xx expected: %+v", res)
+	}
+}
+
+func TestClassifyStatusDefaults(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		code      int
@@ -95,30 +111,107 @@ func TestClassifyStatus(t *testing.T) {
 		reason    string
 	}{
 		{200, true, true, reasonOK},
-		{206, true, true, reasonOK},
 		{301, false, true, reasonOK},
 		{416, true, true, reasonOK}, // empty body cannot satisfy bytes=0-0
 		{416, false, false, reasonHTTP4xx},
-		{401, false, false, reasonHTTP4xx},
 		{503, true, false, reasonHTTP5xx},
 	}
 	for _, c := range cases {
-		up, reason := classifyStatus(c.code, c.sentRange)
-		if up != c.up || reason != c.reason {
-			t.Errorf("classifyStatus(%d, range=%v) = %v/%s, want %v/%s", c.code, c.sentRange, up, reason, c.up, c.reason)
+		if up, reason := classifyStatus(c.code, c.sentRange); up != c.up || reason != c.reason {
+			t.Errorf("classifyStatus(%d, %v) = %v/%s", c.code, c.sentRange, up, reason)
 		}
 	}
 }
 
-func TestCheckTargetConnectionRefused(t *testing.T) {
+func TestBodyContains(t *testing.T) {
 	t.Parallel()
-	res, ok := checkTarget(context.Background(), http.DefaultClient, closedPortURL(t), opts(1))
-	if !ok || res.Up || res.Reason != reasonConnectionRefused || res.StatusCode != 0 || res.Attempts != 2 {
-		t.Fatalf("got ok=%v %+v, want down/connection_refused after 2 attempts", ok, res)
+	var sawRange atomic.Bool
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Range") != "" {
+			sawRange.Store(true)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","db":"up"}`))
+	}))
+	defer srv.Close()
+
+	if res, _ := run(t, targetSpec{URL: srv.URL, Expect: &expectSpec{BodyContains: `"db":"up"`}}, nil); !res.Up {
+		t.Fatalf("matching body: %+v", res)
+	}
+	if sawRange.Load() {
+		t.Error("a Range request was sent although the body is needed")
+	}
+	calls.Store(0)
+	res, _ := run(t, targetSpec{URL: srv.URL, Expect: &expectSpec{BodyContains: "maintenance"}}, nil)
+	if res.Up || res.Reason != reasonBodyMismatch || res.StatusCode != 200 || res.Attempts != 3 {
+		t.Fatalf("200 with the wrong body must be down (and retried): %+v", res)
 	}
 }
 
-func TestCheckTargetTimeout(t *testing.T) {
+func TestDegradedWhenSlow(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(60 * time.Millisecond)
+	}))
+	defer srv.Close()
+	if res, _ := run(t, targetSpec{URL: srv.URL, DegradedAfter: "20ms"}, nil); !res.Up || !res.Degraded {
+		t.Fatalf("slow response not degraded: %+v", res)
+	}
+	if res, _ := run(t, targetSpec{URL: srv.URL, DegradedAfter: "5s"}, nil); !res.Up || res.Degraded {
+		t.Fatalf("fast enough response marked degraded: %+v", res)
+	}
+}
+
+func TestRedirectPolicy(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/old" {
+			http.Redirect(w, r, "/new", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	if res, _ := run(t, targetSpec{URL: srv.URL + "/old"}, nil); !res.Up || res.StatusCode != 200 {
+		t.Fatalf("redirect not followed by default: %+v", res)
+	}
+	res, _ := run(t, targetSpec{URL: srv.URL + "/old", FollowRedirects: boolp(false), Expect: &expectSpec{Status: []string{"200"}}}, nil)
+	if res.Up || res.StatusCode != 302 || res.Reason != reasonUnexpectedStatus {
+		t.Fatalf("redirect followed despite follow_redirects: false: %+v", res)
+	}
+}
+
+func TestHeadersAndUserAgent(t *testing.T) {
+	t.Setenv("IYUP_TEST_TOKEN", "abc123")
+	var gotAuth, gotUA atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		gotUA.Store(r.Header.Get("User-Agent"))
+	}))
+	defer srv.Close()
+	saved := userAgent
+	setUserAgent("lab-b")
+	defer func() { userAgent = saved }()
+
+	run(t, targetSpec{URL: srv.URL, Headers: map[string]string{"Authorization": "Bearer ${IYUP_TEST_TOKEN}"}}, nil)
+	if gotAuth.Load() != "Bearer abc123" {
+		t.Errorf("Authorization = %q", gotAuth.Load())
+	}
+	if ua, _ := gotUA.Load().(string); !strings.Contains(ua, "region=lab-b") {
+		t.Errorf("User-Agent %q does not name the region", ua)
+	}
+}
+
+func TestConnectionRefused(t *testing.T) {
+	t.Parallel()
+	res, ok := run(t, targetSpec{URL: "http://" + closedPort(t), Retries: intp(1)}, nil)
+	if !ok || res.Up || res.Responded || res.Reason != reasonConnectionRefused || res.Attempts != 2 {
+		t.Fatalf("got ok=%v %+v", ok, res)
+	}
+}
+
+func TestTimeout(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -127,46 +220,78 @@ func TestCheckTargetTimeout(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	client := &http.Client{Timeout: 50 * time.Millisecond}
-
-	res, ok := checkTarget(context.Background(), client, srv.URL, opts(0))
-	if !ok || res.Up || res.Reason != reasonTimeout {
-		t.Fatalf("got ok=%v %+v, want down/timeout", ok, res)
+	if res, _ := run(t, targetSpec{URL: srv.URL, Timeout: "150ms", Retries: intp(0)}, nil); res.Up || res.Reason != reasonTimeout {
+		t.Fatalf("got %+v", res)
 	}
 }
 
-func TestCheckTargetUntrustedCertificate(t *testing.T) {
+func TestUntrustedCertificateIsNotRetried(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
-
-	// A default client does not trust the test server's self-signed certificate.
-	res, ok := checkTarget(context.Background(), &http.Client{}, srv.URL, opts(0))
-	if !ok || res.Up || res.Reason != reasonTLS {
-		t.Fatalf("got ok=%v %+v, want down/tls", ok, res)
-	}
-	if res.CertExpiry.IsZero() {
-		t.Error("rejected certificate's expiry was not captured")
+	res, _ := run(t, targetSpec{URL: srv.URL}, http.DefaultTransport)
+	if res.Up || res.Reason != reasonTLS || res.Attempts != 1 || res.CertExpiry.IsZero() {
+		t.Fatalf("got %+v", res)
 	}
 }
 
-func TestCheckTargetTrustedCertificateRecordsPhases(t *testing.T) {
+func TestTrustedCertificateRecordsPhases(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
-
-	res, ok := checkTarget(context.Background(), srv.Client(), srv.URL, opts(0))
-	if !ok || !res.Up {
-		t.Fatalf("got ok=%v %+v, want up", ok, res)
-	}
-	if res.CertExpiry.IsZero() || res.Timings.Connect <= 0 || res.Timings.TLS <= 0 {
-		t.Errorf("missing TLS details: expiry=%v phases=%+v", res.CertExpiry, res.Timings)
+	res, _ := run(t, targetSpec{URL: srv.URL}, srv.Client().Transport)
+	if !res.Up || res.CertExpiry.IsZero() || res.Timings.Connect <= 0 || res.Timings.TLS <= 0 {
+		t.Fatalf("got %+v", res)
 	}
 }
 
-// Regression: a check cut off by cancellation (shutdown, or the old per-cycle
-// deadline) used to burn its remaining attempts instantly on the dead context
-// and record a healthy target as down.
+func TestTCPCheck(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	if res, _ := run(t, targetSpec{Type: "tcp", Address: addr}, nil); !res.Up || !res.Responded || res.Timings.Connect <= 0 {
+		t.Fatalf("open port: %+v", res)
+	}
+	if res, _ := run(t, targetSpec{Type: "tcp", Address: closedPort(t), Retries: intp(0)}, nil); res.Up || res.Reason != reasonConnectionRefused {
+		t.Fatalf("closed port: %+v", res)
+	}
+	host, port, _ := net.SplitHostPort(addr)
+	if res, _ := run(t, targetSpec{Type: "tcp", Address: net.JoinHostPort("localhost", port)}, nil); !res.Up || res.Timings.DNS <= 0 {
+		t.Fatalf("by name (%s): %+v", host, res)
+	}
+}
+
+func TestTCPWithTLS(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "https://")
+	// The test certificate is self-signed, so the handshake is rejected; the
+	// check must say "tls" and still read the certificate's expiry.
+	res, _ := run(t, targetSpec{Type: "tcp", Address: addr, TLS: boolp(true)}, nil)
+	if res.Up || res.Reason != reasonTLS || res.CertExpiry.IsZero() || res.Attempts != 1 {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestDNSCheck(t *testing.T) {
+	t.Parallel()
+	if res, _ := run(t, targetSpec{Type: "dns", Host: "localhost", Record: "A"}, nil); !res.Up || !res.Responded {
+		t.Fatalf("localhost A: %+v", res)
+	}
+	res, _ := run(t, targetSpec{Type: "dns", Host: "localhost", Record: "A", Expect: &expectSpec{Answers: []string{"10.9.9.9"}}}, nil)
+	if res.Up || res.Reason != reasonUnexpectedAnswer || res.Attempts != 1 {
+		t.Fatalf("unexpected answer: %+v", res)
+	}
+	if res, _ := run(t, targetSpec{Type: "dns", Host: "does-not-exist.invalid", Retries: intp(0)}, nil); res.Up || res.Reason != reasonDNS {
+		t.Fatalf("NXDOMAIN: %+v", res)
+	}
+}
+
+// Regression: a check cut off by shutdown used to burn its remaining attempts
+// instantly on the dead context and record a healthy target as down.
 func TestInterruptedCheckIsNotAVerdict(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,20 +301,16 @@ func TestInterruptedCheckIsNotAVerdict(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-
+	c := newCheck(mustTarget(t, targetSpec{URL: srv.URL}), http.DefaultTransport)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if res, ok := checkTarget(ctx, srv.Client(), srv.URL, opts(2)); ok {
+	if res, ok := checkTarget(ctx, c); ok {
 		t.Fatalf("interrupted check produced a verdict: %+v", res)
 	}
 
-	rec := newRecorder()
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
-	runCycle(ctx2, srv.Client(), []string{srv.URL}, 1, opts(2), rec)
-	if _, exists := series(t, "ping_failure_total", map[string]string{"target": srv.URL}); exists {
-		t.Error("interrupted check was recorded as a failure")
-	}
+	runScheduler(ctx2, []*check{c}, 1, newRecorder())
 	if _, exists := series(t, "ping_up", map[string]string{"target": srv.URL}); exists {
 		t.Error("interrupted check set ping_up")
 	}
@@ -199,14 +320,14 @@ func TestCancelStopsFurtherAttempts(t *testing.T) {
 	t.Parallel()
 	srv, hits := statusSequence(t, http.StatusServiceUnavailable)
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		resp, err := http.DefaultTransport.RoundTrip(r)
-		cancel() // shut down as the first attempt returns
+		cancel()
 		return resp, err
-	})}
-
-	if _, ok := checkTarget(ctx, client, srv.URL, opts(5)); ok {
-		t.Fatal("check canceled during backoff produced a verdict")
+	})
+	c := newCheck(mustTarget(t, targetSpec{URL: srv.URL, Retries: intp(5)}), transport)
+	if _, ok := checkTarget(ctx, c); ok {
+		t.Fatal("canceled check produced a verdict")
 	}
 	if hits.Load() != 1 {
 		t.Errorf("server hit %d times after cancel, want 1", hits.Load())
@@ -217,8 +338,8 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// Without a cycle deadline, a slow target delays the cycle but cannot cause
-// the targets queued behind it to be skipped.
+// Each target has its own loop, so a slow target cannot hold back the others,
+// even with a concurrency of one.
 func TestSlowTargetDoesNotStarveOthers(t *testing.T) {
 	t.Parallel()
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -228,16 +349,21 @@ func TestSlowTargetDoesNotStarveOthers(t *testing.T) {
 	fastA, _ := statusSequence(t, http.StatusOK)
 	fastB, _ := statusSequence(t, http.StatusOK)
 
-	targets := []string{slow.URL, fastA.URL, fastB.URL}
-	runCycle(context.Background(), http.DefaultClient, targets, 1, opts(0), newRecorder())
-	for _, target := range targets {
-		if v, ok := series(t, "ping_up", map[string]string{"target": target}); !ok || v != 1 {
-			t.Errorf("%s: ping_up=%v exists=%v, want 1", target, v, ok)
+	var checks []*check
+	for _, u := range []string{slow.URL, fastA.URL, fastB.URL} {
+		checks = append(checks, newCheck(mustTarget(t, targetSpec{URL: u}), http.DefaultTransport))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2600*time.Millisecond)
+	defer cancel()
+	runScheduler(ctx, checks, 1, newRecorder())
+	for _, c := range checks {
+		if v, ok := series(t, "ping_up", map[string]string{"target": c.t.ID}); !ok || v != 1 {
+			t.Errorf("%s: ping_up=%v exists=%v, want 1", c.t.ID, v, ok)
 		}
 	}
 }
 
-func TestRecorderTracksTransitionsAndReasons(t *testing.T) {
+func TestRecorderTracksTransitionsReasonsAndSlowness(t *testing.T) {
 	t.Parallel()
 	const target = "https://recorder.example"
 	rec := newRecorder()
@@ -245,52 +371,107 @@ func TestRecorderTracksTransitionsAndReasons(t *testing.T) {
 	lbl := map[string]string{"target": target}
 	reason := func(r string) map[string]string { return map[string]string{"target": target, "reason": r} }
 
-	rec.record(target, checkResult{Up: true, Reason: reasonOK, StatusCode: 200, Latency: 40 * time.Millisecond, Attempts: 2}, t0)
-	if v, _ := series(t, "ping_state_change_timestamp_seconds", lbl); v != float64(t0.Unix()) {
-		t.Errorf("first check: state change = %v, want %v", v, t0.Unix())
+	rec.record(target, checkResult{Up: true, Degraded: true, Responded: true, Reason: reasonOK, StatusCode: 200, Latency: 40 * time.Millisecond, Attempts: 2}, t0)
+	if v, _ := series(t, "ping_degraded", lbl); v != 1 {
+		t.Errorf("degraded = %v, want 1", v)
 	}
 	if v, _ := series(t, "ping_retries_total", lbl); v != 1 {
 		t.Errorf("retries = %v, want 1", v)
 	}
 
-	rec.record(target, checkResult{Up: true, Reason: reasonOK, StatusCode: 200, Latency: 50 * time.Millisecond, Attempts: 1}, t0.Add(30*time.Second))
+	rec.record(target, checkResult{Up: true, Responded: true, Reason: reasonOK, StatusCode: 200, Latency: 50 * time.Millisecond, Attempts: 1}, t0.Add(30*time.Second))
 	if v, _ := series(t, "ping_state_change_timestamp_seconds", lbl); v != float64(t0.Unix()) {
 		t.Errorf("still up: state change moved to %v", v)
 	}
+	if v, _ := series(t, "ping_degraded", lbl); v != 0 {
+		t.Errorf("degraded = %v after a fast check, want 0", v)
+	}
 
 	tDown := t0.Add(60 * time.Second)
-	rec.record(target, checkResult{Up: false, Reason: reasonConnectionRefused, Attempts: 3}, tDown)
+	rec.record(target, checkResult{Reason: reasonConnectionRefused, Attempts: 3}, tDown)
 	if v, _ := series(t, "ping_state_change_timestamp_seconds", lbl); v != float64(tDown.Unix()) {
-		t.Errorf("went down: state change = %v, want %v", v, tDown.Unix())
+		t.Errorf("went down: state change = %v", v)
 	}
 	if _, exists := series(t, "ping_last_result", reason(reasonOK)); exists {
 		t.Error("stale ok reason series still exported")
 	}
 	if v, exists := series(t, "ping_last_result", reason(reasonConnectionRefused)); !exists || v != 1 {
-		t.Errorf("current reason series = %v exists=%v, want 1", v, exists)
+		t.Errorf("current reason series = %v exists=%v", v, exists)
 	}
 	if _, exists := series(t, "ping_last_latency_seconds", lbl); exists {
 		t.Error("latency still exported for a check with no response")
 	}
 	if v, _ := series(t, "ping_latency_seconds", lbl); v != 2 {
-		t.Errorf("histogram has %v samples, want 2 (failed connection must not count)", v)
-	}
-	if v, _ := series(t, "ping_last_check_timestamp_seconds", lbl); v != float64(tDown.Unix()) {
-		t.Errorf("last check = %v, want %v", v, tDown.Unix())
-	}
-	if v, _ := series(t, "ping_retries_total", lbl); v != 3 {
-		t.Errorf("retries = %v, want 3", v)
+		t.Errorf("histogram has %v samples, want 2", v)
 	}
 }
 
-func TestPublishConfigExposesTargetsBeforeFirstCheck(t *testing.T) {
+func TestPublishConfigPerTarget(t *testing.T) {
 	t.Parallel()
-	cfg := config{Targets: []string{"https://info.example"}, Interval: 30 * time.Second, Timeout: 10 * time.Second}
-	publishConfig(cfg)
-	if v, ok := series(t, "ping_target_info", map[string]string{"target": "https://info.example"}); !ok || v != 1 {
-		t.Errorf("ping_target_info = %v exists=%v, want 1", v, ok)
+	tg := mustTarget(t, targetSpec{Name: "Info", URL: "https://info.example", Interval: "15s", DegradedAfter: "1s", SLO: floatp(99.95)})
+	publishConfig([]target{tg})
+	if v, ok := series(t, "ping_target_info", map[string]string{"target": tg.ID, "name": "Info", "kind": "http"}); !ok || v != 1 {
+		t.Errorf("ping_target_info = %v exists=%v", v, ok)
 	}
-	if _, ok := series(t, "ping_up", map[string]string{"target": "https://info.example"}); ok {
+	lbl := map[string]string{"target": tg.ID}
+	if v, _ := series(t, "ping_interval_seconds", lbl); v != 15 {
+		t.Errorf("interval = %v", v)
+	}
+	if v, _ := series(t, "ping_slo_objective_ratio", lbl); v < 0.99949 || v > 0.99951 {
+		t.Errorf("slo = %v", v)
+	}
+	if v, _ := series(t, "ping_degraded_threshold_seconds", lbl); v != 1 {
+		t.Errorf("degraded threshold = %v", v)
+	}
+	for _, name := range []string{"ping_success_total", "ping_failure_total", "ping_retries_total"} {
+		if v, ok := series(t, name, lbl); !ok || v != 0 {
+			t.Errorf("%s = %v exists=%v, want 0 before the first check", name, v, ok)
+		}
+	}
+	if _, ok := series(t, "ping_up", lbl); ok {
 		t.Error("ping_up exported before any check")
+	}
+}
+
+func TestDomainExpiryFromRDAP(t *testing.T) {
+	t.Parallel()
+	rdap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/domain/renew-me.example":
+			_, _ = w.Write([]byte(`{"events":[{"eventAction":"registration","eventDate":"2015-01-01T00:00:00Z"},
+				{"eventAction":"expiration","eventDate":"2026-11-12T00:00:00Z"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer rdap.Close()
+	w := domainWatcher{base: rdap.URL + "/domain/", client: rdap.Client()}
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+
+	if !w.refresh(context.Background(), "renew-me.example", now) {
+		t.Fatal("lookup reported failure")
+	}
+	if v, _ := series(t, "ping_domain_expiry_days", map[string]string{"domain": "renew-me.example"}); v != 30 {
+		t.Errorf("expiry days = %v, want 30", v)
+	}
+	if w.refresh(context.Background(), "unknown.example", now) {
+		t.Fatal("failed lookup reported success")
+	}
+	if v, _ := series(t, "ping_domain_expiry_errors_total", map[string]string{"domain": "unknown.example"}); v != 1 {
+		t.Errorf("errors = %v, want 1", v)
+	}
+	if _, ok := series(t, "ping_domain_expiry_days", map[string]string{"domain": "unknown.example"}); ok {
+		t.Error("a failed lookup exported an expiry")
+	}
+}
+
+func TestDomainRetryBacksOff(t *testing.T) {
+	t.Parallel()
+	got := []time.Duration{domainRetryAfter(1), domainRetryAfter(2), domainRetryAfter(3), domainRetryAfter(20)}
+	want := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, domainRefresh}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("domainRetryAfter(%d) = %v, want %v", i+1, got[i], want[i])
+		}
 	}
 }

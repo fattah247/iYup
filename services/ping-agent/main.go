@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +17,12 @@ import (
 )
 
 func main() {
+	// `ping-agent validate [targets.yml]` checks a configuration and exits,
+	// so a typo fails CI instead of a deployment.
+	if len(os.Args) > 1 && os.Args[1] == "validate" {
+		os.Exit(validate(os.Args[2:]))
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -30,21 +38,29 @@ func main() {
 		reg = prometheus.WrapRegistererWith(prometheus.Labels{"region": cfg.Region}, reg)
 	}
 	registerMetrics(reg)
-	publishConfig(cfg)
+	publishConfig(cfg.Targets)
+	setUserAgent(cfg.Region)
 
-	log.Printf("checking %d target(s) every %v (timeout=%v retries=%d concurrency=%d method=%s region=%q)",
-		len(cfg.Targets), cfg.Interval, cfg.Timeout, cfg.RetryCount, cfg.Concurrency, cfg.Method, cfg.Region)
-	if worst := cfg.worstCaseCheck(); worst > cfg.Interval {
-		log.Printf("note: an unreachable target can take up to %v to check, longer than the %v interval; cycles will run back to back", worst, cfg.Interval)
-	}
+	log.Printf("checking %d target(s) from %s (concurrency=%d region=%q)",
+		len(cfg.Targets), cfg.Source, cfg.Concurrency, cfg.Region)
 
 	// Disable keep-alives so each check measures the full connection
 	// lifecycle (DNS + TCP + TLS), matching what a first-time visitor sees.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableKeepAlives = true
-	client := &http.Client{Timeout: cfg.Timeout, Transport: transport}
 
-	go runScheduler(ctx, client, cfg, newRecorder())
+	checks := make([]*check, 0, len(cfg.Targets))
+	for _, t := range cfg.Targets {
+		log.Printf("  %s every %v (timeout=%v retries=%d slo=%g%%%s)",
+			t.ID, t.Interval, t.Timeout, t.Retries, t.SLO*100, describeExtras(t))
+		if worst := t.worstCaseCheck(); worst > t.Interval {
+			log.Printf("  note: %s can take up to %v to check when unreachable, longer than its interval", t.ID, worst)
+		}
+		checks = append(checks, newCheck(t, transport))
+	}
+
+	go runScheduler(ctx, checks, cfg.Concurrency, newRecorder())
+	go domainWatcher{base: cfg.RDAPBase, client: &http.Client{Timeout: 20 * time.Second}, domains: cfg.Domains}.run(ctx)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -84,24 +100,43 @@ func main() {
 	}
 }
 
-// runScheduler runs a cycle immediately and then on every tick. Cycles never
-// overlap: if one outlasts the interval, the ticker's single buffered tick
-// starts the next one right away and further ticks are dropped.
-func runScheduler(ctx context.Context, client *http.Client, cfg config, rec *recorder) {
-	ticker := time.NewTicker(cfg.Interval)
-	defer ticker.Stop()
-
-	opts := cfg.probeOptions()
-	for {
-		start := time.Now()
-		runCycle(ctx, client, cfg.Targets, cfg.Concurrency, opts, rec)
-		if took := time.Since(start); took > cfg.Interval && ctx.Err() == nil {
-			log.Printf("[SLOW] check cycle took %v, longer than the %v interval", took.Truncate(time.Millisecond), cfg.Interval)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+func validate(args []string) int {
+	if len(args) > 0 {
+		os.Setenv("PING_TARGETS_FILE", args[0])
+		os.Unsetenv("PING_TARGET_URLS")
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid: %v\n", err)
+		return 1
+	}
+	fmt.Printf("ok: %d target(s) and %d domain(s) from %s\n", len(cfg.Targets), len(cfg.Domains), cfg.Source)
+	for _, t := range cfg.Targets {
+		fmt.Printf("  %-5s %s every %v%s\n", t.Kind, t.ID, t.Interval, describeExtras(t))
+	}
+	return 0
+}
+
+// describeExtras lists the non-default parts of a target for the startup log.
+func describeExtras(t target) string {
+	var parts []string
+	if t.Name != "" {
+		parts = append(parts, "name="+t.Name)
+	}
+	if len(t.ExpectStatus) > 0 {
+		parts = append(parts, "expect_status=custom")
+	}
+	if t.BodyContains != "" {
+		parts = append(parts, "body_contains=set")
+	}
+	if t.DegradedAfter > 0 {
+		parts = append(parts, "degraded_after="+t.DegradedAfter.String())
+	}
+	if len(t.Headers) > 0 {
+		parts = append(parts, fmt.Sprintf("headers=%d", len(t.Headers)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
 }

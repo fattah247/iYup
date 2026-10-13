@@ -1,0 +1,47 @@
+# What the ping-agent checks. Edit, then apply with: docker compose up -d ping-agent
+# Setting PING_TARGET_URLS (in .env) overrides this file with a plain URL list.
+# Full reference: docs/CONFIGURATION.md
+
+defaults:
+  interval: 30s
+  timeout: 10s
+  retries: 2
+  slo: 99.9 # availability objective in percent, judged over 30 days
+
+targets:
+  - name: Google
+    url: https://google.com
+  - name: GitHub
+    url: https://github.com
+
+# More of what a target can do (uncomment and adapt):
+#
+#  - name: API health
+#    url: https://api.example.com/health
+#    headers:
+#      Authorization: "Bearer ${API_TOKEN}" # read from the agent's environment, never stored here
+#    expect:
+#      status: ["200"]
+#      body_contains: '"status":"ok"' # a 200 with the wrong page is still down
+#    degraded_after: 800ms # slower than this counts as slow
+#    interval: 15s
+#    slo: 99.95
+#
+#  - name: Postgres
+#    type: tcp
+#    address: db.example.com:5432
+#
+#  - name: Mail server certificate
+#    type: tcp
+#    address: mail.example.com:465
+#    tls: true
+#
+#  - name: Mail routing
+#    type: dns
+#    host: example.com
+#    record: MX
+#    expect:
+#      answers: [mx1.example.com]
+
+# Domain registrations to watch for expiry (looked up via RDAP twice a day).
+domains: []
