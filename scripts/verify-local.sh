@@ -16,6 +16,7 @@ API_GATEWAY_PORT="${API_GATEWAY_PORT:-8080}"
 PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 ALERTMANAGER_PORT="${ALERTMANAGER_PORT:-9093}"
+PING_AGENT_PORT="${PING_AGENT_PORT:-18080}"
 
 pass() {
   printf 'PASS %s\n' "$1"
@@ -45,6 +46,26 @@ wait_for_http() {
   done
 
   fail "$name"
+}
+
+wait_for_body() {
+  local name="$1"
+  local url="$2"
+  local needle="$3"
+  local attempts="${4:-30}"
+  local delay="${5:-2}"
+
+  local body
+  for ((i = 0; i < attempts; i++)); do
+    body="$(curl -fsS "$url" 2>/dev/null)" || body=""
+    if [[ "$body" == *"$needle"* ]]; then
+      pass "$name"
+      return 0
+    fi
+    sleep "$delay"
+  done
+
+  fail "$name (no $needle at $url)"
 }
 
 assert_contains() {
@@ -82,7 +103,10 @@ pass "api healthz body"
 status_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/status")"
 assert_contains "status endpoint" "$status_body" '"targets"'
 assert_contains "status endpoint reports per-target state" "$status_body" '"state"'
+assert_contains "status endpoint reports per-region results" "$status_body" '"regions"'
 pass "status endpoint"
+
+wait_for_body "ping-agent publishes its targets" "http://localhost:${PING_AGENT_PORT}/metrics" 'ping_target_info{'
 
 page_body="$(curl -fsS "http://localhost:${API_GATEWAY_PORT}/")"
 assert_contains "status page" "$page_body" '<title>iYup status</title>'
@@ -100,13 +124,16 @@ if has_service prometheus; then
   wait_for_http "prometheus ready" "http://localhost:${PROMETHEUS_PORT}/-/ready"
 
   rules_body="$(curl -fsS "http://localhost:${PROMETHEUS_PORT}/api/v1/rules")"
-  for rule in TargetDown TargetUnreliable TargetChecksStale CertificateExpiringSoon PingAgentDown ApiGatewayDown; do
-    assert_contains "alert rule $rule loaded" "$rules_body" "\"$rule\""
+  for rule in iyup:target_up:quorum iyup:target_error_ratio:rate1h \
+    TargetDown ErrorBudgetBurnFast ErrorBudgetBurnSlow TargetRegionalFailure TargetSlow TargetChecksStale \
+    CertificateExpiringSoon DomainExpiringSoon AllPingAgentsDown PingAgentDown ApiGatewayDown Watchdog; do
+    assert_contains "rule $rule loaded" "$rules_body" "\"$rule\""
   done
-  pass "alert rules loaded"
+  pass "recording and alert rules loaded"
 
   wait_for_http "history endpoint" "http://localhost:${API_GATEWAY_PORT}/history?window=1h&buckets=4"
   wait_for_http "outages endpoint" "http://localhost:${API_GATEWAY_PORT}/outages?window=1h"
+  wait_for_http "error budget endpoint" "http://localhost:${API_GATEWAY_PORT}/slo?window=1h"
 fi
 
 if has_service grafana; then
@@ -115,4 +142,10 @@ fi
 
 if has_service alertmanager; then
   wait_for_http "alertmanager ready" "http://localhost:${ALERTMANAGER_PORT}/-/ready"
+  # The always-firing Watchdog proves the whole path: rules evaluate, Prometheus
+  # reaches Alertmanager, and Alertmanager accepts alerts.
+  wait_for_body "heartbeat reaches alertmanager" \
+    "http://localhost:${ALERTMANAGER_PORT}/api/v2/alerts?filter=alertname%3D%22Watchdog%22" '"Watchdog"' 45
+  wait_for_body "status API reads maintenance windows" \
+    "http://localhost:${API_GATEWAY_PORT}/status" '"alertmanager":"reachable"'
 fi
