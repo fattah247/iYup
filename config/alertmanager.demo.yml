@@ -1,0 +1,53 @@
+# Demo routing: identical to alertmanager.yml, but every receiver posts to the
+# demo-targets helper, which prints what it gets. See: docker compose logs demo-targets
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: notify
+  group_by: [alertname, target]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # The always-firing heartbeat goes to a dead man's switch every minute.
+    - matchers: [alertname="Watchdog"]
+      receiver: heartbeat
+      group_by: [alertname]
+      group_wait: 0s
+      group_interval: 1m
+      # Repeats go out on group_interval ticks once repeat_interval has passed
+      # since the last send; 1m would just miss every other tick (2m cadence).
+      repeat_interval: 50s
+    # Critical alerts page someone; everything else is a notification.
+    - matchers: [severity="critical"]
+      receiver: page
+      repeat_interval: 1h
+
+inhibit_rules:
+  # A target that is down already has TargetDown; its other symptoms are noise.
+  - source_matchers: [alertname="TargetDown"]
+    target_matchers: [alertname=~"TargetSlow|TargetRegionalFailure|ErrorBudgetBurnFast|ErrorBudgetBurnSlow"]
+    equal: [target]
+  # The fast burn already covers what the slow burn would say.
+  - source_matchers: [alertname="ErrorBudgetBurnFast"]
+    target_matchers: [alertname="ErrorBudgetBurnSlow"]
+    equal: [target]
+  # Without any agent, per-agent alerts add nothing.
+  - source_matchers: [alertname="AllPingAgentsDown"]
+    target_matchers: [alertname=~"PingAgentDown|TargetChecksStale"]
+
+receivers:
+  - name: page
+    webhook_configs:
+      - url: http://demo-targets:8080/webhook/page
+        send_resolved: true
+  - name: notify
+    webhook_configs:
+      - url: http://demo-targets:8080/webhook/notify
+        send_resolved: true
+  - name: heartbeat
+    webhook_configs:
+      - url: http://demo-targets:8080/webhook/heartbeat
+        send_resolved: false

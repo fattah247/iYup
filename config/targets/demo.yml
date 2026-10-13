@@ -1,0 +1,46 @@
+# Demo targets covering every state the stack can show. Used by docker-compose.demo.yml,
+# with two agents (lab-a and lab-b) so regional failures are visible too.
+
+defaults:
+  interval: 30s
+  timeout: 10s
+  retries: 2
+  slo: 99.9
+
+targets:
+  - name: Example (HTTPS)
+    url: https://example.com
+    degraded_after: 2s
+  - name: Health API
+    url: http://demo-targets:8080/health
+    expect:
+      status: ["200"]
+      body_contains: '"status":"ok"'
+  - name: Slow page
+    url: http://demo-targets:8080/slow
+    degraded_after: 1s
+  - name: Flaky page
+    url: http://demo-targets:8080/flaky
+  - name: Flapping page          # down often, never for a minute: only the error budget catches it
+    url: http://demo-targets:8080/flapping
+    interval: 30s                # the endpoint's 75s cycle is tuned to this interval
+  - name: Regional outage
+    url: http://demo-targets:8080/regional
+  - name: Wrong content
+    url: http://demo-targets:8080/wrong-content
+    expect:
+      body_contains: Welcome
+  - name: Broken page
+    url: http://demo-targets:8080/down
+  - name: Nothing listening
+    url: http://demo-targets:9
+  - name: Demo TCP port
+    type: tcp
+    address: demo-targets:8080
+  - name: example.com DNS
+    type: dns
+    host: example.com
+    record: A
+
+domains:
+  - example.com
