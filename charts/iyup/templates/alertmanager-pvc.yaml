@@ -1,0 +1,12 @@
+# Silences (maintenance windows) and notification state survive restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "iyup.fullname" . }}-alertmanager-data
+  labels:
+    {{- include "iyup.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.alertmanager.pvcSize }}

@@ -1,9 +1,21 @@
 nameOverride: ""
 fullnameOverride: ""
 
-pingTargets: # rendered into PING_TARGET_URLS for the ping-agent; the api-gateway discovers them from it
+# Plain URL list, used when `checks` is empty. The api-gateway discovers
+# targets from the agent, so it needs no list of its own.
+pingTargets:
   - https://google.com
   - https://github.com
+
+# Checks as code: the same format as config/targets/targets.yml (see
+# docs/CONFIGURATION.md). When set, it replaces pingTargets.
+checks: {}
+# checks:
+#   defaults: {interval: 30s, slo: 99.9}
+#   targets:
+#     - {name: Website, url: https://example.com, degraded_after: 1s}
+#     - {name: Postgres, type: tcp, address: "db.internal:5432"}
+#   domains: [example.com]
 
 image:
   pingAgent: ping-agent:latest
@@ -20,6 +32,7 @@ pingAgent:
   retryCount: 2
   httpMethod: GET
   rangeRequest: true
+  region: "" # set per cluster when several agents report to one Prometheus
 
 service:
   apiGatewayPort: 80
@@ -31,11 +44,14 @@ service:
   alertLoggerPort: 8080
 
 prometheus:
-  retention: 14d
+  retention: 35d # long enough to judge a 30-day error budget
   pvcSize: 5Gi
 
 grafana:
   pvcSize: 5Gi
+
+alertmanager:
+  pvcSize: 1Gi
 
 alert:
   # Every alert goes to the in-cluster alert-logger. Email and Slack receivers
@@ -47,6 +63,14 @@ alert:
     password: ""
     to: ""
   slackWebhook: ""
+  discordWebhook: ""
+  telegram:
+    botToken: ""
+    chatId: 0
+  webhookUrl: "" # any receiver that accepts Alertmanager's webhook JSON
+  # Dead man's switch for the always-firing Watchdog alert, e.g. a
+  # healthchecks.io ping URL that alerts you when the heartbeat stops.
+  heartbeatUrl: ""
 
 ingress:
   enabled: false

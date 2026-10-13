@@ -32,6 +32,8 @@ spec:
               value: 'http://{{ include "iyup.fullname" . }}-ping-agent:8080/metrics'
             - name: PROMETHEUS_URL
               value: 'http://{{ include "iyup.fullname" . }}-prometheus:9090'
+            - name: ALERTMANAGER_URL
+              value: 'http://{{ include "iyup.fullname" . }}-alertmanager:{{ .Values.service.alertmanagerPort }}'
           livenessProbe:
             httpGet:
               path: /healthz
