@@ -1,36 +1,50 @@
+# Alert routing for iYup.
+#
+# Receivers ship empty: alerts are visible at http://localhost:9093 but go
+# nowhere else until you add a channel. Do not put credentials in this file.
+# Copy it to config/alertmanager.local.yml (git-ignored), fill in the receivers,
+# and set ALERTMANAGER_CONFIG=./config/alertmanager.local.yml in .env.
+# docs/ALERTING.md has ready-to-paste receivers and the heartbeat setup;
+# ./scripts/send-test-alert.py proves a channel works end to end.
+
 global:
-  resolve_timeout: 1m
+  resolve_timeout: 5m
 
 route:
-  receiver: default
+  receiver: notify
   group_by: [alertname, target]
   group_wait: 30s
   group_interval: 5m
-  repeat_interval: 1h
+  repeat_interval: 4h
+  routes:
+    # The always-firing heartbeat goes to a dead man's switch every minute.
+    - matchers: [alertname="Watchdog"]
+      receiver: heartbeat
+      group_by: [alertname]
+      group_wait: 0s
+      group_interval: 1m
+      # Repeats go out on group_interval ticks once repeat_interval has passed
+      # since the last send; 1m would just miss every other tick (2m cadence).
+      repeat_interval: 50s
+    # Critical alerts page someone; everything else is a notification.
+    - matchers: [severity="critical"]
+      receiver: page
+      repeat_interval: 1h
 
-# A hard-down target already has TargetDown; don't also page for "unreliable".
 inhibit_rules:
+  # A target that is down already has TargetDown; its other symptoms are noise.
   - source_matchers: [alertname="TargetDown"]
-    target_matchers: [alertname="TargetUnreliable"]
+    target_matchers: [alertname=~"TargetSlow|TargetRegionalFailure|ErrorBudgetBurnFast|ErrorBudgetBurnSlow"]
     equal: [target]
+  # The fast burn already covers what the slow burn would say.
+  - source_matchers: [alertname="ErrorBudgetBurnFast"]
+    target_matchers: [alertname="ErrorBudgetBurnSlow"]
+    equal: [target]
+  # Without any agent, per-agent alerts add nothing.
+  - source_matchers: [alertname="AllPingAgentsDown"]
+    target_matchers: [alertname=~"PingAgentDown|TargetChecksStale"]
 
 receivers:
-  - name: default
-    webhook_configs: []
-    # To add Slack notifications, uncomment:
-    # slack_configs:
-    #   - api_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-    #     channel: "#alerts"
-    #     send_resolved: true
-
-    # To add email notifications, add to global section above:
-    # smtp_smarthost: smtp.gmail.com:587
-    # smtp_from: alerts@example.com
-    # smtp_auth_username: you@gmail.com
-    # smtp_auth_password: your-app-password
-    # smtp_require_tls: true
-    #
-    # Then uncomment:
-    # email_configs:
-    #   - to: "you@example.com"
-    #     send_resolved: true
+  - name: page
+  - name: notify
+  - name: heartbeat
