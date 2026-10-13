@@ -1,0 +1,2 @@
+# Demo: two agents on one machine, standing in for two regions.
+- targets: [ping-agent:8080, ping-agent-b:8080]

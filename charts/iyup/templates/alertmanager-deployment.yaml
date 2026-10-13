@@ -24,12 +24,18 @@ spec:
           image: {{ .Values.image.alertmanager | quote }}
           args:
             - "--config.file=/etc/alertmanager/alertmanager.yml"
+            - "--storage.path=/alertmanager"
           ports:
             - containerPort: 9093
           volumeMounts:
             - name: config
               mountPath: /etc/alertmanager
+            - name: data
+              mountPath: /alertmanager
       volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "iyup.fullname" . }}-alertmanager-data
         - name: config
           secret:
             secretName: {{ include "iyup.fullname" . }}-alertmanager-config

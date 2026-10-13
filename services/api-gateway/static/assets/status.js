@@ -10,6 +10,9 @@ const REASONS = {
   ok: "OK",
   http_4xx: "client error",
   http_5xx: "server error",
+  unexpected_status: "unexpected status",
+  body_mismatch: "expected text missing from the page",
+  unexpected_answer: "unexpected DNS answer",
   timeout: "timed out",
   dns: "DNS lookup failed",
   connection_refused: "connection refused",
@@ -17,11 +20,13 @@ const REASONS = {
   network: "network error",
   error: "request failed",
   pending: "waiting for the first check",
-  not_monitored: "not checked by the ping-agent",
+  not_monitored: "not checked by any ping-agent",
 };
 
 const ICONS = {
   up: "M5 12.5l4.5 4.5L19 7.5",
+  slow: "M12 7v5l3 2M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z",
+  maintenance: "M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z",
   down: "M7 7l10 10M17 7L7 17",
   unknown: "M9.2 9.2a2.9 2.9 0 1 1 4.1 2.6c-.8.4-1.3 1-1.3 1.9v.6M12 17.6v.1",
 };
@@ -33,6 +38,7 @@ const CRITTER_COLORS = {
   unknown: "#cfcbe0",
   unreachable: "#cfcbe0",
   loading: "#cfcbe0",
+  maintenance: "#b9d3ec",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -46,6 +52,7 @@ const state = {
   historyError: null,
   outages: null,
   outagesError: null,
+  slo: null,
   previous: new Map(), // url -> state, to announce changes
   rows: new Map(), // url -> row refs
   timers: { status: 0, history: 0 },
@@ -209,11 +216,13 @@ async function refreshStatus() {
 
 async function refreshHistory() {
   const w = state.window;
-  const [history, outages] = await Promise.allSettled([
+  const [history, outages, slo] = await Promise.allSettled([
     getJSON(`/history?window=${w}&buckets=${WINDOWS[w]}`),
     getJSON(`/outages?window=${w}&limit=20`),
+    getJSON("/slo?window=30d"),
   ]);
   if (w !== state.window) return; // the window changed while we were waiting
+  state.slo = slo.status === "fulfilled" ? slo.value : null;
   state.history = history.status === "fulfilled" ? history.value : null;
   state.historyError = history.status === "rejected" ? history.reason : null;
   state.outages = outages.status === "fulfilled" ? outages.value : null;
@@ -259,18 +268,28 @@ function heroCopy(status) {
     items.length <= 2 ? items.join(" and ") : `${items.slice(0, 2).join(", ")} and ${plural(items.length - 2, "other")}`;
 
   switch (status.status) {
-    case "operational":
+    case "operational": {
+      const up = summary.total - summary.maintenance;
+      const aside = summary.maintenance ? ` ${plural(summary.maintenance, "target")} in planned maintenance.` : "";
       return {
         headline: "Yup.",
-        subline: summary.total === 1 ? `${targets[0].name} is up.` : `All ${summary.total} targets are up.`,
-      };
-    case "degraded": {
-      const down = names("down");
-      return {
-        headline: "Yup… mostly.",
-        subline: `${list(down)} ${down.length === 1 ? "is" : "are"} down. ${plural(summary.up, "other")} ${summary.up === 1 ? "is" : "are"} up.`,
+        subline: (up === 1 ? `${targets.find((t) => !t.maintenance?.active).name} is up.` : `All ${up} targets are up.`) + aside,
       };
     }
+    case "degraded": {
+      const down = targets.filter((t) => t.state === "down" && !t.maintenance?.active).map((t) => t.name);
+      if (!down.length) {
+        const slow = targets.filter((t) => t.slow).map((t) => t.name);
+        return { headline: "Yup… mostly.", subline: `Everything is up, but ${list(slow)} ${slow.length === 1 ? "is" : "are"} slow.` };
+      }
+      const others = summary.up;
+      return {
+        headline: "Yup… mostly.",
+        subline: `${list(down)} ${down.length === 1 ? "is" : "are"} down.${others ? ` ${plural(others, "other")} ${others === 1 ? "is" : "are"} up.` : ""}`,
+      };
+    }
+    case "maintenance":
+      return { headline: "Back soon.", subline: "Everything is in planned maintenance." };
     case "outage":
       return {
         headline: "Nope.",
@@ -325,6 +344,31 @@ function setFavicon(color) {
     `<rect x="3" y="5" width="26" height="24" rx="11" fill="${color}" stroke="#2b2622" stroke-width="2.5"/>` +
     `<circle cx="12" cy="16" r="2" fill="#2b2622"/><circle cx="20" cy="16" r="2" fill="#2b2622"/></svg>`;
   $("favicon").href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+function renderMaintenance() {
+  const box = $("maintenance");
+  const windows = state.status?.maintenance || [];
+  if (!windows.length) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  const items = windows.map((w) => {
+    const who = w.targets.length <= 3 ? w.targets.join(", ") : `${w.targets.slice(0, 3).join(", ")} and ${plural(w.targets.length - 3, "other")}`;
+    const multiDay = Math.abs(secondsSince(w.ends_at) - secondsSince(w.starts_at)) >= 86400 || !w.active;
+    const when = w.active
+      ? `until ${fmtWhen(w.ends_at, multiDay)}`
+      : `${fmtWhen(w.starts_at, true)} – ${fmtWhen(w.ends_at, multiDay && secondsSince(w.ends_at) < -86400)}`;
+    return el(
+      "li",
+      { class: w.active ? "maint-item is-active" : "maint-item" },
+      icon("maintenance"),
+      el("span", {}, el("strong", { text: w.active ? "Planned maintenance now" : "Upcoming maintenance" }), ` · ${who}, ${when}${w.comment ? ` · ${w.comment}` : ""}`),
+    );
+  });
+  box.replaceChildren(el("ul", {}, ...items));
+  box.hidden = false;
 }
 
 function renderBanner() {
@@ -419,7 +463,10 @@ function createRow(url) {
   const refs = {};
   refs.pill = el("span", { class: "pill" });
   refs.name = el("h3", { class: "target__name" });
-  refs.url = el("a", { class: "target__url", href: url, rel: "noopener noreferrer", target: "_blank", text: url });
+  refs.kind = el("span", { class: "kind-tag", hidden: true });
+  refs.url = /^https?:/.test(url)
+    ? el("a", { class: "target__url", href: url, rel: "noopener noreferrer", target: "_blank", text: url })
+    : el("span", { class: "target__url", text: url });
   refs.uptime = el("span", { class: "figure__value" });
   refs.uptimeLabel = el("span", { class: "figure__label" });
   refs.p95 = el("span", { class: "figure__value" });
@@ -435,7 +482,7 @@ function createRow(url) {
     el(
       "div",
       { class: "target__head" },
-      el("div", { class: "target__id" }, el("div", { class: "target__title" }, refs.name, refs.pill), refs.url),
+      el("div", { class: "target__id" }, el("div", { class: "target__title" }, refs.name, refs.kind, refs.pill), refs.url),
       el(
         "div",
         { class: "figures" },
@@ -449,18 +496,21 @@ function createRow(url) {
   return refs;
 }
 
-function pillText(target) {
-  if (target.state === "up") return "Up";
-  if (target.state === "down") return "Down";
-  if (target.stale) return "Stale";
-  return target.reason === "pending" ? "Pending" : "Unknown";
+function pill(target) {
+  if (target.maintenance?.active) return { kind: "maintenance", text: "Maintenance" };
+  if (target.state === "up") return target.slow ? { kind: "slow", text: "Slow" } : { kind: "up", text: "Up" };
+  if (target.state === "down") return { kind: "down", text: "Down" };
+  return { kind: "unknown", text: target.stale ? "Stale" : target.reason === "pending" ? "Pending" : "Unknown" };
 }
 
 function updateRow(refs, target, history) {
-  refs.li.dataset.state = target.state;
-  refs.pill.className = `pill pill--${target.state}`;
-  refs.pill.replaceChildren(icon(target.state), document.createTextNode(pillText(target)));
+  const p = pill(target);
+  refs.li.dataset.state = p.kind === "slow" ? "slow" : p.kind === "maintenance" ? "maintenance" : target.state;
+  refs.pill.className = `pill pill--${p.kind}`;
+  refs.pill.replaceChildren(icon(p.kind), document.createTextNode(p.text));
   refs.name.textContent = target.name;
+  refs.kind.textContent = target.kind === "http" ? "" : target.kind.toUpperCase();
+  refs.kind.hidden = target.kind === "http";
 
   if (history) {
     refs.uptime.textContent = fmtPct(history.availability);
@@ -512,9 +562,16 @@ function renderSummary(summary, target) {
   const { since, beforeWindow } = stateSince(target);
   // An outage that began before the window has lasted longer than we can see.
   const lasted = since ? `${beforeWindow ? "over " : ""}${fmtDuration(secondsSince(since))}` : null;
+  if (target.maintenance?.active) {
+    const until = fmtWhen(target.maintenance.ends_at, secondsSince(target.maintenance.ends_at) < -86400);
+    parts.push(el("span", { class: "maint", text: `Planned maintenance until ${until}` }));
+    if (target.maintenance.comment) parts.push(target.maintenance.comment);
+  }
   if (target.state === "up") {
-    if (lasted) parts.push(`Up for ${lasted}`);
-    if (target.latency_ms != null) parts.push(fmtMs(target.latency_ms));
+    if (lasted && !target.maintenance?.active) parts.push(`Up for ${lasted}`);
+    if (target.latency_ms != null) {
+      parts.push(target.slow ? el("span", { class: "slowtext", text: `${fmtMs(target.latency_ms)}, slower than ${fmtMs(target.slow_threshold_ms)}` }) : fmtMs(target.latency_ms));
+    }
   } else if (target.state === "down") {
     if (lasted) parts.push(`Down for ${lasted}`);
     parts.push(el("span", { class: "reason", text: describeReason(target) }));
@@ -523,6 +580,10 @@ function renderSummary(summary, target) {
     if (target.reason) parts.push(`last result: ${describeReason(target)}`);
   } else {
     parts.push(target.reason === "not_monitored" ? "The ping-agent isn't checking this URL" : "Waiting for the first check");
+  }
+  if (target.regions_total > 1 && target.regions_failing > 0 && target.state === "up") {
+    const failing = target.regions.filter((r) => r.state === "down").map((r) => r.region);
+    parts.push(el("span", { class: "regional", text: `failing from ${failing.join(", ")} (${target.regions_failing} of ${target.regions_total} regions)` }));
   }
   if (target.last_checked_at && !target.stale) parts.push(`checked ${fmtAgo(secondsSince(target.last_checked_at))}`);
 
@@ -539,9 +600,40 @@ function detail(term, ...value) {
   return el("div", { class: "detail" }, el("dt", { text: term }), el("dd", {}, ...value));
 }
 
+function regionList(target) {
+  const list = el("ul", { class: "region-list" });
+  for (const r of target.regions) {
+    const ok = r.state === "up";
+    const text =
+      r.state === "up" ? `${fmtMs(r.latency_ms)}${r.slow ? " (slow)" : ""}` : r.state === "down" ? describeReason(r) : r.stale ? "no fresh check" : "waiting";
+    const item = el("li", { class: `region region--${r.state}` }, icon(ok ? "up" : r.state === "down" ? "down" : "unknown"));
+    item.append(el("strong", { text: r.region }), document.createTextNode(` ${text}`));
+    list.append(item);
+  }
+  return list;
+}
+
+function budgetDetail(target) {
+  const row = state.slo?.targets.find((t) => t.url === target.url);
+  if (!row || row.budget_remaining == null) return null;
+  const left = row.budget_remaining;
+  const used = fmtDuration(row.downtime_seconds);
+  const allowed = fmtDuration(row.allowed_downtime_seconds);
+  const text = left >= 0 ? `${Math.round(left)}% left · ${used} of ${allowed} used` : `Overspent · ${used} down, ${allowed} allowed`;
+  const coverage = row.coverage_seconds < 30 * 86400 ? ` (based on ${fmtDuration(row.coverage_seconds)} of data)` : "";
+  const value = el("span", { class: left < 0 ? "reason" : left < 25 ? "slowtext" : "", text: text + coverage });
+  return detail(`Error budget, 30 days at ${row.objective}%`, value);
+}
+
 function renderDetails(body, target) {
   const items = [];
-  items.push(detail("Last response", target.http_status ? `HTTP ${target.http_status}` : "No response"));
+  if (target.kind === "http") {
+    items.push(detail("Last response", target.http_status ? `HTTP ${target.http_status}` : "No response"));
+  } else {
+    items.push(detail("Check", target.kind === "dns" ? "DNS lookup" : target.url.startsWith("tls://") ? "TCP connect + TLS handshake" : "TCP connect"));
+  }
+  const budget = budgetDetail(target);
+  if (budget) items.push(budget);
 
   const days = target.ssl_cert_expiry_days;
   if (days != null) {
@@ -554,12 +646,17 @@ function renderDetails(body, target) {
   const okShare = target.availability != null ? `, ${fmtPct(target.availability)} ok` : "";
   items.push(
     detail(
-      "Checks since agent start",
+      target.regions.length > 1 ? "Checks since agent start, all regions" : "Checks since agent start",
       `${numberFmt.format(target.total_checks)}${okShare}`,
       target.retries ? ` · ${plural(target.retries, "retry", "retries")}` : "",
     ),
   );
   if (target.last_checked_at) items.push(detail("Last check", fmtWhen(target.last_checked_at, true)));
+  if (target.regions.length > 1) {
+    const regions = detail(`Checked from ${target.regions.length} regions`, regionList(target));
+    regions.classList.add("detail--wide");
+    items.push(regions);
+  }
 
   const phases = target.connection_ms;
   if (target.latency_ms != null && (phases.dns != null || phases.tcp != null || phases.tls != null)) {
@@ -781,6 +878,7 @@ function renderOutages() {
 function render() {
   renderHero();
   renderBanner();
+  renderMaintenance();
   renderFreshness();
   renderTargets();
   renderOutages();

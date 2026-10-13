@@ -2,7 +2,9 @@ services:
   ping-agent:
     build: services/ping-agent
     environment:
-      - PING_TARGET_URLS=${PING_TARGET_URLS:-https://google.com,https://github.com}
+      # Targets come from config/targets/targets.yml; PING_TARGET_URLS, when set, overrides it.
+      - PING_TARGETS_FILE=${PING_TARGETS_FILE:-/etc/iyup/targets.yml}
+      - PING_TARGET_URLS=${PING_TARGET_URLS:-}
       - PING_INTERVAL_SECONDS=${PING_INTERVAL_SECONDS:-30}
       - PING_TIMEOUT_SECONDS=${PING_TIMEOUT_SECONDS:-10}
       - PING_CONCURRENCY=${PING_CONCURRENCY:-5}
@@ -10,6 +12,8 @@ services:
       - PING_HTTP_METHOD=${PING_HTTP_METHOD:-GET}
       - PING_RANGE_REQUEST=${PING_RANGE_REQUEST:-true}
       - PING_REGION=${PING_REGION:-}
+    volumes:
+      - ./config/targets:/etc/iyup:ro
     ports:
       - "${PING_AGENT_PORT:-18080}:8080"
     restart: unless-stopped
@@ -22,9 +26,11 @@ services:
   api-gateway:
     build: services/api-gateway
     environment:
-      # Targets are discovered from the ping-agent, so the two cannot drift.
+      # Targets are discovered from the ping-agent(s), so they cannot drift.
+      # Comma-separate several agents to vote across regions.
       - PING_AGENT_METRICS_URL=http://ping-agent:8080/metrics
       - PROMETHEUS_URL=http://prometheus:9090
+      - ALERTMANAGER_URL=http://alertmanager:9093
       - PROMETHEUS_QUERY_CACHE_SECONDS=${PROMETHEUS_QUERY_CACHE_SECONDS:-15}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
     ports:
@@ -44,10 +50,12 @@ services:
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./config/alert.rules.yml:/etc/prometheus/rules/alert.rules.yml:ro
+      - ./config/agents.yml:/etc/prometheus/agents.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-14d}"
+      # Long enough to judge a 30-day error budget.
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-35d}"
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     depends_on:
@@ -74,7 +82,9 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.27.0
     volumes:
-      - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Point ALERTMANAGER_CONFIG at a git-ignored copy that holds your receivers.
+      - ${ALERTMANAGER_CONFIG:-./config/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
     ports:
       - "${ALERTMANAGER_PORT:-9093}:9093"
     restart: unless-stopped
@@ -82,3 +92,4 @@ services:
 volumes:
   prometheus-data:
   grafana-data:
+  alertmanager-data: # silences (maintenance windows) survive restarts

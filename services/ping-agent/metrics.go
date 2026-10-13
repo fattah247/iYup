@@ -111,27 +111,55 @@ var (
 		},
 		[]string{"target"},
 	)
+	pingDegraded = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ping_degraded",
+			Help: "1 when the latest check succeeded but took longer than the target's degraded_after",
+		},
+		[]string{"target"},
+	)
 	pingTargetInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ping_target_info",
 			Help: "Configured targets, present (value 1) from startup even before the first check",
 		},
-		[]string{"target"},
+		[]string{"target", "name", "kind"},
 	)
-	pingInterval = prometheus.NewGauge(prometheus.GaugeOpts{
+	pingInterval = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ping_interval_seconds",
-		Help: "Configured pause between check cycles",
-	})
-	pingStaleAfter = prometheus.NewGauge(prometheus.GaugeOpts{
+		Help: "Configured pause between checks of the target",
+	}, []string{"target"})
+	pingStaleAfter = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "ping_stale_after_seconds",
-		Help: "A target whose last check is older than this should be treated as unknown, not up or down",
-	})
+		Help: "A check older than this should be treated as unknown, not up or down",
+	}, []string{"target"})
+	pingDegradedThreshold = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ping_degraded_threshold_seconds",
+		Help: "Latency above which a successful check counts as degraded; absent when not configured",
+	}, []string{"target"})
+	pingSLOObjective = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ping_slo_objective_ratio",
+		Help: "Availability objective for the target, e.g. 0.999",
+	}, []string{"target"})
+	pingDomainExpiry = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ping_domain_expiry_days",
+		Help: "Days until the domain registration expires, from RDAP",
+	}, []string{"domain"})
+	pingDomainChecked = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ping_domain_expiry_last_check_timestamp_seconds",
+		Help: "Unix time of the last successful RDAP lookup",
+	}, []string{"domain"})
+	pingDomainErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ping_domain_expiry_errors_total",
+		Help: "Failed RDAP lookups",
+	}, []string{"domain"})
 
 	allMetrics = []prometheus.Collector{
 		pingSuccess, pingFailure, pingRetries, pingLatency, pingUp, pingLastLatency,
 		pingLastStatusCode, pingLastResult, pingLastCheck, pingStateChange,
 		pingSSLCertExpiry, pingDNSDuration, pingConnectDuration, pingTLSDuration,
-		pingTargetInfo, pingInterval, pingStaleAfter,
+		pingDegraded, pingTargetInfo, pingInterval, pingStaleAfter, pingDegradedThreshold,
+		pingSLOObjective, pingDomainExpiry, pingDomainChecked, pingDomainErrors,
 	}
 )
 
@@ -141,14 +169,24 @@ func registerMetrics(reg prometheus.Registerer) {
 	}
 }
 
-// publishConfig exposes the target list and timing budget before the first
-// check finishes, so consumers can tell "not checked yet" from "down".
-func publishConfig(cfg config) {
-	for _, target := range cfg.Targets {
-		pingTargetInfo.WithLabelValues(target).Set(1)
+// publishConfig exposes each target and its settings before the first check
+// finishes, so consumers can tell "not checked yet" from "down".
+func publishConfig(targets []target) {
+	for _, t := range targets {
+		pingTargetInfo.WithLabelValues(t.ID, t.Name, t.Kind).Set(1)
+		pingInterval.WithLabelValues(t.ID).Set(t.Interval.Seconds())
+		pingStaleAfter.WithLabelValues(t.ID).Set(t.staleAfter().Seconds())
+		pingSLOObjective.WithLabelValues(t.ID).Set(t.SLO)
+		// Counters exist at zero from startup: a target that never failed has
+		// ping_failure_total 0 rather than no series, so success + failure
+		// arithmetic and increase() count from the very first check.
+		pingSuccess.WithLabelValues(t.ID)
+		pingFailure.WithLabelValues(t.ID)
+		pingRetries.WithLabelValues(t.ID)
+		if t.DegradedAfter > 0 {
+			pingDegradedThreshold.WithLabelValues(t.ID).Set(t.DegradedAfter.Seconds())
+		}
 	}
-	pingInterval.Set(cfg.Interval.Seconds())
-	pingStaleAfter.Set(cfg.staleAfter().Seconds())
 }
 
 // recorder turns check results into metrics and remembers the per-target state
@@ -172,15 +210,23 @@ func (r *recorder) record(target string, res checkResult, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if res.StatusCode > 0 {
+	if res.Responded {
 		pingLatency.WithLabelValues(target).Observe(res.Latency.Seconds())
 		pingLastLatency.WithLabelValues(target).Set(res.Latency.Seconds())
-		pingLastStatusCode.WithLabelValues(target).Set(float64(res.StatusCode))
 	} else {
 		// No response means no response time; keeping the previous value would
 		// make a dead target look fast.
 		pingLastLatency.DeleteLabelValues(target)
+	}
+	if res.StatusCode > 0 {
+		pingLastStatusCode.WithLabelValues(target).Set(float64(res.StatusCode))
+	} else {
 		pingLastStatusCode.DeleteLabelValues(target)
+	}
+	if res.Degraded {
+		pingDegraded.WithLabelValues(target).Set(1)
+	} else {
+		pingDegraded.WithLabelValues(target).Set(0)
 	}
 	setOrDelete(pingDNSDuration, target, res.Timings.DNS)
 	setOrDelete(pingConnectDuration, target, res.Timings.Connect)
@@ -225,6 +271,9 @@ func logResult(target string, res checkResult, prev targetState, seen bool, now 
 	case seen && !prev.up && res.Up:
 		log.Printf("[RECOVERED] %s is back up after %v down, status=%d latency=%v",
 			target, now.Sub(prev.since).Truncate(time.Second), res.StatusCode, latency)
+	case res.Up && res.Degraded:
+		log.Printf("[SLOW] %s latency=%v is above its degraded_after threshold, status=%d attempts=%d",
+			target, latency, res.StatusCode, res.Attempts)
 	case res.Up:
 		log.Printf("[UP] %s status=%d latency=%v dns=%v tcp=%v tls=%v attempts=%d",
 			target, res.StatusCode, latency,

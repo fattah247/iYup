@@ -13,6 +13,10 @@ spec:
       app.kubernetes.io/component: ping-agent
   template:
     metadata:
+      {{- if .Values.checks }}
+      annotations:
+        checksum/targets: {{ include (print $.Template.BasePath "/ping-agent-targets-configmap.yaml") . | sha256sum }}
+      {{- end }}
       labels:
         {{- include "iyup.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: ping-agent
@@ -24,8 +28,15 @@ spec:
         ports:
         - containerPort: 8080
         env:
+          {{- if .Values.checks }}
+          - name: PING_TARGETS_FILE
+            value: /etc/iyup/targets.yml
+          {{- else }}
           - name: PING_TARGET_URLS
             value: '{{ join "," .Values.pingTargets }}'
+          {{- end }}
+          - name: PING_REGION
+            value: {{ .Values.pingAgent.region | quote }}
           - name: PING_INTERVAL_SECONDS
             value: {{ .Values.pingAgent.intervalSeconds | quote }}
           - name: PING_TIMEOUT_SECONDS
@@ -38,6 +49,12 @@ spec:
             value: {{ .Values.pingAgent.httpMethod | quote }}
           - name: PING_RANGE_REQUEST
             value: {{ .Values.pingAgent.rangeRequest | quote }}
+        {{- if .Values.checks }}
+        volumeMounts:
+          - name: targets
+            mountPath: /etc/iyup
+            readOnly: true
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /healthz
@@ -50,3 +67,9 @@ spec:
             port: 8080
           initialDelaySeconds: 2
           periodSeconds: 5
+      {{- if .Values.checks }}
+      volumes:
+        - name: targets
+          configMap:
+            name: {{ include "iyup.fullname" . }}-ping-agent-targets
+      {{- end }}

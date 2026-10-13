@@ -1,4 +1,6 @@
-# Demo overlay: targets in every state (up, slow, flaky, 503, refused).
+# Demo overlay: targets in every state, checked from two "regions" so quorum
+# and regional failures are visible. Both agents run on this machine; the
+# regions are labels, not real locations.
 #   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
 services:
   demo-targets:
@@ -12,4 +14,35 @@ services:
     depends_on:
       - demo-targets
     environment:
-      - PING_TARGET_URLS=https://example.com,http://demo-targets:8080/slow,http://demo-targets:8080/flaky,http://demo-targets:8080/down,http://demo-targets:9
+      - PING_TARGETS_FILE=/etc/iyup/demo.yml
+      - PING_TARGET_URLS=
+      - PING_REGION=lab-a
+
+  ping-agent-b:
+    build: services/ping-agent
+    depends_on:
+      - demo-targets
+    environment:
+      - PING_TARGETS_FILE=/etc/iyup/demo.yml
+      - PING_REGION=lab-b
+    volumes:
+      - ./config/targets:/etc/iyup:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  api-gateway:
+    environment:
+      - PING_AGENT_METRICS_URL=http://ping-agent:8080/metrics,http://ping-agent-b:8080/metrics
+
+  prometheus:
+    volumes:
+      - ./config/agents.demo.yml:/etc/prometheus/agents.yml:ro
+
+  # Every receiver posts to demo-targets, which logs what it gets.
+  alertmanager:
+    volumes:
+      - ./config/alertmanager.demo.yml:/etc/alertmanager/alertmanager.yml:ro

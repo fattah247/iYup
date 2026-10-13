@@ -91,7 +91,7 @@ log "Starting ping-agent on port 18080..."
 cd "$PING_AGENT_DIR"
 export PING_TARGET_URLS="https://google.com,https://github.com"
 export PING_INTERVAL_SECONDS=30
-go run main.go &
+go run . &
 PING_AGENT_PID=$!
 
 # Wait for ping-agent to be ready

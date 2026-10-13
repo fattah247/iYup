@@ -3,26 +3,21 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// config is everything the agent reads from the environment, validated once at
-// startup so a typo fails loudly instead of producing a target that is
-// "down" forever.
+// config is everything the agent reads at startup, validated once so a typo
+// fails loudly instead of producing a target that is "down" forever.
 type config struct {
-	Targets      []string
-	Interval     time.Duration
-	Timeout      time.Duration
-	Concurrency  int
-	RetryCount   int
-	MaxBodyBytes int64
-	Method       string
-	UseRange     bool
-	Region       string
+	Targets     []target
+	Domains     []string
+	Source      string // where the targets came from, for the startup log
+	Concurrency int
+	Region      string
+	RDAPBase    string
 }
 
 const maxBackoff = 5 * time.Second
@@ -30,26 +25,53 @@ const maxBackoff = 5 * time.Second
 // backoffBase is the pause before the first retry; it doubles per retry.
 var backoffBase = 500 * time.Millisecond
 
+// loadConfig reads targets from PING_TARGET_URLS when it is set (a quick
+// override, and the original interface), otherwise from PING_TARGETS_FILE,
+// otherwise it checks two public sites so a fresh checkout shows something.
 func loadConfig() (config, error) {
-	cfg := config{
-		Targets:      parseTargetsEnv(os.Getenv("PING_TARGET_URLS")),
+	base := baseDefaults{
 		Interval:     getenvDurationSeconds("PING_INTERVAL_SECONDS", 30),
 		Timeout:      getenvDurationSeconds("PING_TIMEOUT_SECONDS", 10),
-		Concurrency:  getenvInt("PING_CONCURRENCY", 5),
-		RetryCount:   getenvNonNegativeInt("PING_RETRY_COUNT", 2),
-		MaxBodyBytes: int64(getenvInt("PING_BODY_MAX_BYTES", 65536)),
+		Retries:      getenvNonNegativeInt("PING_RETRY_COUNT", 2),
 		Method:       strings.ToUpper(getenvOrDefault("PING_HTTP_METHOD", http.MethodGet)),
 		UseRange:     getenvBool("PING_RANGE_REQUEST", true),
-		Region:       getenvOrDefault("PING_REGION", ""),
+		SLO:          getenvPercent("PING_SLO", 99.9) / 100,
+		MaxBodyBytes: int64(getenvInt("PING_BODY_MAX_BYTES", 65536)),
 	}
-	if len(cfg.Targets) == 0 {
-		cfg.Targets = defaultTargets()
+	cfg := config{
+		Concurrency: getenvInt("PING_CONCURRENCY", 5),
+		Region:      getenvOrDefault("PING_REGION", ""),
+		RDAPBase:    getenvOrDefault("PING_RDAP_URL", "https://rdap.org/domain/"),
 	}
-	if err := validateTargets(cfg.Targets); err != nil {
-		return config{}, err
+
+	urls := parseTargetsEnv(os.Getenv("PING_TARGET_URLS"))
+	file := strings.TrimSpace(os.Getenv("PING_TARGETS_FILE"))
+	switch {
+	case len(urls) > 0:
+		cfg.Source = "PING_TARGET_URLS"
+	case file != "":
+		targets, domains, err := loadTargetsFile(file, base)
+		if err != nil {
+			return config{}, err
+		}
+		cfg.Targets, cfg.Domains, cfg.Source = targets, domains, file
+		return cfg, nil
+	default:
+		urls = defaultTargets()
+		cfg.Source = "built-in defaults"
 	}
-	if cfg.Method != http.MethodGet && cfg.Method != http.MethodHead {
-		return config{}, fmt.Errorf("PING_HTTP_METHOD must be GET or HEAD, got %q", cfg.Method)
+
+	var problems []string
+	for _, u := range urls {
+		t, err := resolveTarget(targetSpec{}, targetSpec{URL: u}, base)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%q: %v", u, err))
+			continue
+		}
+		cfg.Targets = append(cfg.Targets, t)
+	}
+	if len(problems) > 0 {
+		return config{}, fmt.Errorf("PING_TARGET_URLS has invalid entries: %s", strings.Join(problems, "; "))
 	}
 	return cfg, nil
 }
@@ -61,22 +83,6 @@ func backoffBefore(n int) time.Duration {
 		return maxBackoff
 	}
 	return d
-}
-
-// worstCaseCheck is the longest a single target check can take: every attempt
-// times out and every backoff is served in full.
-func (c config) worstCaseCheck() time.Duration {
-	total := time.Duration(1+c.RetryCount) * c.Timeout
-	for n := 1; n <= c.RetryCount; n++ {
-		total += backoffBefore(n)
-	}
-	return total
-}
-
-// staleAfter is how old a target's last check may get before consumers should
-// stop trusting it: one missed cycle plus one worst-case check.
-func (c config) staleAfter() time.Duration {
-	return 2*c.Interval + c.worstCaseCheck()
 }
 
 // parseTargetsEnv splits a comma-separated list, trimming blanks and dropping
@@ -93,20 +99,6 @@ func parseTargetsEnv(value string) []string {
 		targets = append(targets, target)
 	}
 	return targets
-}
-
-func validateTargets(targets []string) error {
-	var bad []string
-	for _, target := range targets {
-		u, err := url.Parse(target)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			bad = append(bad, target)
-		}
-	}
-	if len(bad) > 0 {
-		return fmt.Errorf("PING_TARGET_URLS has invalid entries %q: each target must be an absolute http(s) URL such as https://example.com", bad)
-	}
-	return nil
 }
 
 func defaultTargets() []string {
@@ -142,6 +134,18 @@ func parseEnvInt(name string) (int, bool) {
 	}
 	value, err := strconv.Atoi(raw)
 	return value, err == nil
+}
+
+func getenvPercent(name string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value <= 0 || value >= 100 {
+		return fallback
+	}
+	return value
 }
 
 func getenvOrDefault(name, fallback string) string {

@@ -1,58 +1,153 @@
-# Alert rules for iYup. Behaviour is pinned by config/alert.rules.test.yml:
+# Recording and alert rules for iYup. Behaviour is pinned by config/alert.rules.test.yml:
 #   docker run --rm -v "$PWD/config:/c:ro" --entrypoint promtool prom/prometheus:v2.54.1 test rules /c/alert.rules.test.yml
 # Helm reads this same file through charts/iyup/files/alert.rules.yml (a symlink).
 
 groups:
+  # One definition of "is this target up", shared by alerts, history and dashboards.
+  # Each agent (region) reports ping_up; a target is up when at least half of the
+  # regions with fresh data see it up. With a single agent this is just ping_up.
+  # last_over_time bridges the brief gap while an agent restarts.
+  - name: iyup-recording
+    interval: 15s
+    rules:
+      - record: iyup:target_regions:count
+        expr: count by (target) (last_over_time(ping_up[2m]))
+      - record: iyup:target_regions_up:count
+        expr: sum by (target) (last_over_time(ping_up[2m]))
+      - record: iyup:target_up:quorum
+        expr: iyup:target_regions_up:count * 2 >= bool iyup:target_regions:count
+      # Slow when most of the regions that reach the target find it slow.
+      - record: iyup:target_degraded:quorum
+        expr: sum by (target) (last_over_time(ping_degraded[2m])) * 2 > bool iyup:target_regions_up:count
+      - record: iyup:target_availability:avg5m
+        expr: avg_over_time(iyup:target_up:quorum[5m])
+      - record: iyup:target_slo:objective
+        expr: max by (target) (ping_slo_objective_ratio)
+      # Error ratios over the windows the burn-rate alerts use: observed downtime
+      # divided by the whole window, so missing data (a young install, an agent
+      # restart) counts as unknown rather than inflating the ratio. Each sample
+      # stands for 15s, this group's evaluation interval. Long windows use the
+      # 5-minute series to keep evaluation cheap.
+      - record: iyup:target_error_ratio:rate5m
+        expr: (count_over_time(iyup:target_up:quorum[5m]) - sum_over_time(iyup:target_up:quorum[5m])) * 15 / 300
+      - record: iyup:target_error_ratio:rate30m
+        expr: (count_over_time(iyup:target_up:quorum[30m]) - sum_over_time(iyup:target_up:quorum[30m])) * 15 / 1800
+      - record: iyup:target_error_ratio:rate1h
+        expr: (count_over_time(iyup:target_up:quorum[1h]) - sum_over_time(iyup:target_up:quorum[1h])) * 15 / 3600
+      - record: iyup:target_error_ratio:rate6h
+        expr: >-
+          (count_over_time(iyup:target_availability:avg5m[6h]) - sum_over_time(iyup:target_availability:avg5m[6h]))
+          * 15 / 21600
+      - record: iyup:target_error_ratio:rate3d
+        expr: >-
+          (count_over_time(iyup:target_availability:avg5m[3d]) - sum_over_time(iyup:target_availability:avg5m[3d]))
+          * 15 / 259200
+
   - name: iyup-targets
     rules:
-      # ping_up is the agent's verdict after retries, so this fires on sustained
-      # failure whatever PING_INTERVAL_SECONDS is. (The old rule counted failures
-      # per minute and could not fire at all once the interval reached 40s.)
-      # last_over_time bridges the brief gap while the agent restarts, which
-      # otherwise marks ping_up stale and resolves-then-repages on every deploy;
-      # a real recovery still resolves at once because the newest sample wins.
+      # Fires on the agents' post-retry verdict, so it works at any check
+      # interval, and only when a majority of regions agree.
       - alert: TargetDown
-        expr: last_over_time(ping_up[2m]) == 0
+        expr: iyup:target_up:quorum == 0
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "{{ $labels.target }} is down"
           description: >-
-            Every check of {{ $labels.target }} has failed for at least a minute, after retries.
+            Checks of {{ $labels.target }} have failed for at least a minute, after
+            retries{{ with query (printf "iyup:target_regions:count{target='%s'}" $labels.target) }}{{ if gt (index . 0).Value 1.0 }},
+            from a majority of regions{{ end }}{{ end }}.
             Latest reason: {{ with query (printf "ping_last_result{target='%s'}" $labels.target) }}{{ (index . 0).Labels.reason }}{{ else }}unknown{{ end }}.
           runbook: docs/OPERATIONS_RUNBOOK.md#targetdown
 
-      # Catches targets that fail some checks but never long enough for
-      # TargetDown. "More than two changes" is what makes it intermittent: a
-      # single clean outage is exactly two (down, then up) and must not leave a
-      # "keeps failing" warning behind once TargetDown resolves.
-      # Alertmanager suppresses it while TargetDown is firing.
-      - alert: TargetUnreliable
-        expr: avg_over_time(ping_up[15m]) < 0.9 and changes(ping_up[15m]) > 2
+      - alert: TargetRegionalFailure
+        expr: iyup:target_up:quorum == 1 and iyup:target_regions_up:count < iyup:target_regions:count
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.target }} keeps failing intermittently"
+          summary: "{{ $labels.target }} is failing from some regions"
           description: >-
-            {{ $labels.target }} was up for only {{ $value | humanizePercentage }} of the last 15 minutes.
-          runbook: docs/OPERATIONS_RUNBOOK.md#targetunreliable
+            Checks from {{ range $i, $s := query (printf "last_over_time(ping_up{target='%s'}[2m]) == 0" $labels.target) }}{{ if $i }},
+            {{ end }}{{ $s.Labels.region }}{{ end }} have failed for 5 minutes while most regions still succeed.
+            Usually a regional network, DNS or CDN problem.
+          runbook: docs/OPERATIONS_RUNBOOK.md#targetregionalfailure
+
+      - alert: TargetSlow
+        expr: iyup:target_degraded:quorum == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.target }} is slow"
+          description: >-
+            Responses from {{ $labels.target }} have been slower than
+            {{ with query (printf "max(ping_degraded_threshold_seconds{target='%s'})" $labels.target) }}{{ (index . 0).Value | humanizeDuration }}{{ else }}its threshold{{ end }}
+            for 5 minutes.
+          runbook: docs/OPERATIONS_RUNBOOK.md#targetslow
+
+      # Multi-window, multi-burn-rate alerts (Google SRE workbook, chapter 5) for
+      # a 30-day objective. They catch failures TargetDown does not page for,
+      # such as a target failing every other check. Each window pair ignores an
+      # outage TargetDown already paged for while that outage is still inside the
+      # pair's short window, so a recovered outage does not page a second time.
+      - alert: ErrorBudgetBurnFast
+        expr: >-
+          (
+            iyup:target_error_ratio:rate1h / on (target) (1 - iyup:target_slo:objective) > 14.4
+            and
+            iyup:target_error_ratio:rate5m / on (target) (1 - iyup:target_slo:objective) > 14.4
+            unless on (target) max_over_time(ALERTS{alertname="TargetDown", alertstate="firing"}[10m])
+          )
+          or
+          (
+            iyup:target_error_ratio:rate6h / on (target) (1 - iyup:target_slo:objective) > 6
+            and
+            iyup:target_error_ratio:rate30m / on (target) (1 - iyup:target_slo:objective) > 6
+            unless on (target) max_over_time(ALERTS{alertname="TargetDown", alertstate="firing"}[35m])
+          )
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.target }} is burning its error budget fast"
+          description: >-
+            Failures are spending the 30-day error budget of {{ $labels.target }} at 6 to 14 times
+            the sustainable rate or more. At this pace the whole budget is gone within days.
+          runbook: docs/OPERATIONS_RUNBOOK.md#errorbudgetburn
+
+      - alert: ErrorBudgetBurnSlow
+        expr: >-
+          iyup:target_error_ratio:rate3d / on (target) (1 - iyup:target_slo:objective) > 1
+          and
+          iyup:target_error_ratio:rate6h / on (target) (1 - iyup:target_slo:objective) > 1
+          unless on (target) max_over_time(ALERTS{alertname="TargetDown", alertstate="firing"}[6h])
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.target }} is spending its error budget faster than it earns it"
+          description: >-
+            Over the last 3 days {{ $labels.target }} has failed more often than its objective allows.
+            If this continues the 30-day error budget runs out before the month does.
+          runbook: docs/OPERATIONS_RUNBOOK.md#errorbudgetburn
 
       - alert: TargetChecksStale
-        expr: (time() - ping_last_check_timestamp_seconds) > ignoring(target) group_left ping_stale_after_seconds
+        expr: (time() - ping_last_check_timestamp_seconds) > ping_stale_after_seconds
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "No fresh checks for {{ $labels.target }}"
           description: >-
-            The ping-agent is running but has not finished a check of {{ $labels.target }} for
-            {{ $value | humanizeDuration }}, so its state is unknown. The agent may be overloaded or stuck.
+            The ping-agent{{ with $labels.region }} in {{ . }}{{ end }} is running but has not finished a check of
+            {{ $labels.target }} for {{ $value | humanizeDuration }}, so its state is unknown there.
+            The agent may be overloaded or stuck.
           runbook: docs/OPERATIONS_RUNBOOK.md#targetchecksstale
 
       - alert: CertificateExpiringSoon
-        expr: ping_ssl_cert_expiry_days < 14
+        expr: min by (target) (ping_ssl_cert_expiry_days) < 14
         for: 10m
         labels:
           severity: warning
@@ -61,20 +156,54 @@ groups:
           description: "Renew the certificate. A negative value means it has already expired."
           runbook: docs/OPERATIONS_RUNBOOK.md#certificateexpiringsoon
 
+      - alert: DomainExpiringSoon
+        expr: min by (domain) (ping_domain_expiry_days) < 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Domain {{ $labels.domain }} expires in {{ $value | printf \"%.0f\" }} days"
+          description: "Renew the registration (or check auto-renew) before the site, mail and certificates stop working."
+          runbook: docs/OPERATIONS_RUNBOOK.md#domainexpiringsoon
+
   - name: iyup-pipeline
     rules:
-      # Without the agent nothing is checked, so TargetDown cannot fire.
-      # This is the alert that keeps a dead monitor from looking like silence.
-      - alert: PingAgentDown
-        expr: up{job="ping-agent"} == 0
+      # Always firing. Route it to an external dead man's switch: when the
+      # heartbeat stops arriving, Prometheus or Alertmanager is broken.
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerting pipeline heartbeat"
+          description: >-
+            This alert always fires. An external dead man's switch should expect it every
+            minute and alert you when it stops, because then nothing else can alert you either.
+          runbook: docs/ALERTING.md#heartbeat
+
+      # With no agent left nothing is checked and target alerts cannot fire.
+      - alert: AllPingAgentsDown
+        expr: sum(up{job="ping-agent"}) == 0 or absent(up{job="ping-agent"})
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "The ping-agent is down"
+          summary: "No ping-agent is reachable"
           description: >-
-            Prometheus cannot scrape {{ $labels.instance }}. No targets are being checked and
-            target alerts cannot fire until it is back.
+            Prometheus cannot scrape any ping-agent. No targets are being checked and target
+            alerts cannot fire until one is back.
+          runbook: docs/OPERATIONS_RUNBOOK.md#allpingagentsdown
+
+      - alert: PingAgentDown
+        expr: up{job="ping-agent"} == 0 and on () sum(up{job="ping-agent"}) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The ping-agent at {{ $labels.instance }} is down"
+          description: >-
+            Prometheus cannot scrape {{ $labels.instance }}. The other regions keep checking,
+            but the quorum now rests on fewer agents.
           runbook: docs/OPERATIONS_RUNBOOK.md#pingagentdown
 
       - alert: ApiGatewayDown

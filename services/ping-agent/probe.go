@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,18 +11,29 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-const userAgent = "iyup-ping-agent"
+// userAgent identifies the agent (and its region) to the sites it checks.
+var userAgent = "iyup-ping-agent/2"
+
+func setUserAgent(region string) {
+	if region != "" {
+		userAgent = "iyup-ping-agent/2 (region=" + region + ")"
+	}
+}
 
 // Failure reasons are a closed set so they are safe to use as a metric label.
 const (
 	reasonOK                = "ok"
 	reasonHTTP4xx           = "http_4xx"
 	reasonHTTP5xx           = "http_5xx"
+	reasonUnexpectedStatus  = "unexpected_status"
+	reasonBodyMismatch      = "body_mismatch"
+	reasonUnexpectedAnswer  = "unexpected_answer"
 	reasonTimeout           = "timeout"
 	reasonDNS               = "dns"
 	reasonConnectionRefused = "connection_refused"
@@ -31,31 +43,42 @@ const (
 )
 
 var allReasons = []string{
-	reasonOK, reasonHTTP4xx, reasonHTTP5xx, reasonTimeout, reasonDNS,
-	reasonConnectionRefused, reasonTLS, reasonNetwork, reasonError,
+	reasonOK, reasonHTTP4xx, reasonHTTP5xx, reasonUnexpectedStatus, reasonBodyMismatch,
+	reasonUnexpectedAnswer, reasonTimeout, reasonDNS, reasonConnectionRefused, reasonTLS,
+	reasonNetwork, reasonError,
 }
 
-type probeOptions struct {
-	Method       string
-	UseRange     bool
-	RetryCount   int
-	MaxBodyBytes int64
+// retryable reasons are the ones a second attempt might change. A 404, a
+// rejected certificate or a wrong DNS answer will be just as wrong in a second.
+var retryable = map[string]bool{
+	reasonHTTP5xx: true, reasonBodyMismatch: true, reasonTimeout: true, reasonDNS: true,
+	reasonConnectionRefused: true, reasonNetwork: true, reasonError: true,
 }
 
-func (c config) probeOptions() probeOptions {
-	return probeOptions{
-		Method:       c.Method,
-		UseRange:     c.UseRange,
-		RetryCount:   c.RetryCount,
-		MaxBodyBytes: c.MaxBodyBytes,
+// check is a target plus what it needs at runtime.
+type check struct {
+	t      target
+	client *http.Client
+}
+
+func newCheck(t target, transport http.RoundTripper) *check {
+	c := &check{t: t}
+	if t.Kind == kindHTTP {
+		c.client = &http.Client{Timeout: t.Timeout, Transport: transport}
+		if !t.FollowRedirects {
+			c.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		}
 	}
+	return c
 }
 
 // checkResult is the verdict of one check, after retries.
 type checkResult struct {
 	Up         bool
+	Degraded   bool // up, but slower than the target's degraded_after
 	Reason     string
-	StatusCode int // 0 when no HTTP response was received
+	Responded  bool // the target answered (HTTP response, TCP connect, DNS answer)
+	StatusCode int  // HTTP only; 0 otherwise
 	Latency    time.Duration
 	Timings    phaseTimings
 	CertExpiry time.Time // zero when no certificate was seen
@@ -63,51 +86,11 @@ type checkResult struct {
 	Err        error
 }
 
-func (r checkResult) retryable() bool {
-	return r.StatusCode == 0 || r.StatusCode >= http.StatusInternalServerError
-}
-
-// runCycle checks every target once using a bounded worker pool. Cycles have no
-// deadline of their own: each attempt is bounded by the client timeout, so a
-// slow target delays the cycle (and shows up as stale) instead of being cut off
-// and misreported as down.
-func runCycle(ctx context.Context, client *http.Client, targets []string, concurrency int, opts probeOptions, rec *recorder) {
-	if len(targets) == 0 {
-		return
-	}
-	concurrency = max(1, min(concurrency, len(targets)))
-
-	jobs := make(chan string)
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for target := range jobs {
-				if res, ok := checkTarget(ctx, client, target, opts); ok {
-					rec.record(target, res, time.Now())
-				}
-			}
-		}()
-	}
-
-sendLoop:
-	for _, target := range targets {
-		select {
-		case <-ctx.Done():
-			break sendLoop
-		case jobs <- target:
-		}
-	}
-	close(jobs)
-	wg.Wait()
-}
-
-// checkTarget probes target, retrying transport errors and 5xx responses with
-// exponential backoff. ok is false when ctx ended before a verdict was reached:
-// an interrupted check says nothing about the target and must not be recorded.
-func checkTarget(ctx context.Context, client *http.Client, target string, opts probeOptions) (res checkResult, ok bool) {
-	attempts := 1 + opts.RetryCount
+// checkTarget runs a check, retrying failures that a retry might fix, with
+// exponential backoff. ok is false when ctx ended before a verdict: an
+// interrupted check says nothing about the target and must not be recorded.
+func checkTarget(ctx context.Context, c *check) (res checkResult, ok bool) {
+	attempts := 1 + c.t.Retries
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if attempt > 1 {
 			select {
@@ -116,30 +99,44 @@ func checkTarget(ctx context.Context, client *http.Client, target string, opts p
 			case <-time.After(backoffBefore(attempt - 1)):
 			}
 		}
-		res = attemptOnce(ctx, client, target, opts)
+		res = c.attempt(ctx)
 		res.Attempts = attempt
 		if ctx.Err() != nil {
 			return checkResult{}, false
 		}
-		if !res.retryable() {
-			return res, true
+		if res.Up || !retryable[res.Reason] {
+			break
 		}
 		if attempt < attempts {
-			log.Printf("[RETRY] %s attempt=%d/%d reason=%s %s", target, attempt, attempts, res.Reason, describeFailure(res))
+			log.Printf("[RETRY] %s attempt=%d/%d reason=%s %s", c.t.ID, attempt, attempts, res.Reason, describeFailure(res))
 		}
 	}
+	res.Degraded = res.Up && c.t.DegradedAfter > 0 && res.Latency > c.t.DegradedAfter
 	return res, true
 }
 
-func attemptOnce(ctx context.Context, client *http.Client, target string, opts probeOptions) checkResult {
+func (c *check) attempt(ctx context.Context) checkResult {
+	switch c.t.Kind {
+	case kindTCP:
+		return tcpAttempt(ctx, c.t)
+	case kindDNS:
+		return dnsAttempt(ctx, c.t)
+	default:
+		return httpAttempt(ctx, c.client, c.t)
+	}
+}
+
+func httpAttempt(ctx context.Context, client *http.Client, t target) checkResult {
 	timings := &traceTimings{}
-	req, err := http.NewRequestWithContext(timings.attach(ctx), opts.Method, target, nil)
+	req, err := http.NewRequestWithContext(timings.attach(ctx), t.Method, t.requestURL, nil)
 	if err != nil {
 		return checkResult{Reason: reasonError, Err: err}
 	}
+	for name, values := range t.Headers {
+		req.Header[name] = values
+	}
 	req.Header.Set("User-Agent", userAgent)
-	sentRange := opts.UseRange && opts.Method == http.MethodGet
-	if sentRange {
+	if t.UseRange {
 		req.Header.Set("Range", "bytes=0-0")
 	}
 
@@ -148,24 +145,44 @@ func attemptOnce(ctx context.Context, client *http.Client, target string, opts p
 	latency := time.Since(start)
 	if err != nil {
 		res := checkResult{Reason: classifyError(err), Err: err, Latency: latency, Timings: timings.snapshot()}
-		// A rejected certificate still tells us when it expires (or expired).
-		var certErr *tls.CertificateVerificationError
-		if errors.As(err, &certErr) && len(certErr.UnverifiedCertificates) > 0 {
-			res.CertExpiry = certErr.UnverifiedCertificates[0].NotAfter
-		}
+		res.CertExpiry = rejectedCertExpiry(err)
 		return res
 	}
-	if opts.MaxBodyBytes > 0 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, opts.MaxBodyBytes))
+	var body []byte
+	if t.BodyContains != "" {
+		body, _ = io.ReadAll(io.LimitReader(resp.Body, t.MaxBodyBytes))
+	} else if t.MaxBodyBytes > 0 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, t.MaxBodyBytes))
 	}
 	_ = resp.Body.Close()
 
-	res := checkResult{StatusCode: resp.StatusCode, Latency: latency, Timings: timings.snapshot()}
-	res.Up, res.Reason = classifyStatus(resp.StatusCode, sentRange)
+	res := checkResult{Responded: true, StatusCode: resp.StatusCode, Latency: latency, Timings: timings.snapshot()}
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		res.CertExpiry = resp.TLS.PeerCertificates[0].NotAfter
 	}
+	res.Up, res.Reason = evaluateStatus(t, resp.StatusCode)
+	if res.Up && t.BodyContains != "" && !bytes.Contains(body, []byte(t.BodyContains)) {
+		res.Up, res.Reason = false, reasonBodyMismatch
+	}
 	return res
+}
+
+// evaluateStatus applies the target's expected status codes; without any,
+// 2xx and 3xx count as up.
+func evaluateStatus(t target, code int) (bool, string) {
+	if len(t.ExpectStatus) == 0 {
+		return classifyStatus(code, t.UseRange)
+	}
+	switch {
+	case statusExpected(code, t.ExpectStatus):
+		return true, reasonOK
+	case code >= http.StatusInternalServerError:
+		return false, reasonHTTP5xx
+	case code >= http.StatusBadRequest:
+		return false, reasonHTTP4xx
+	default:
+		return false, reasonUnexpectedStatus
+	}
 }
 
 func classifyStatus(code int, sentRange bool) (up bool, reason string) {
@@ -209,11 +226,24 @@ func classifyError(err error) string {
 	}
 }
 
+// rejectedCertExpiry reads the expiry of a certificate the client refused to
+// trust, so an expired certificate still reports how long ago it expired.
+func rejectedCertExpiry(err error) time.Time {
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) && len(certErr.UnverifiedCertificates) > 0 {
+		return certErr.UnverifiedCertificates[0].NotAfter
+	}
+	return time.Time{}
+}
+
 func describeFailure(res checkResult) string {
 	if res.Err != nil {
 		return "err=" + res.Err.Error()
 	}
-	return "status=" + http.StatusText(res.StatusCode)
+	if res.StatusCode > 0 {
+		return "status=" + strings.TrimSpace(http.StatusText(res.StatusCode))
+	}
+	return ""
 }
 
 // phaseTimings are the connection phases of one attempt; zero means the phase

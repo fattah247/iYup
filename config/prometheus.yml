@@ -14,10 +14,11 @@ alerting:
             - alertmanager:9093
 
 scrape_configs:
+  # One agent per region; the list lives in agents.yml so more can be added
+  # without touching this file (the demo swaps in two).
   - job_name: ping-agent
-    static_configs:
-      - targets:
-          - ping-agent:8080
+    file_sd_configs:
+      - files: [/etc/prometheus/agents.yml]
 
   - job_name: api-gateway
     static_configs:

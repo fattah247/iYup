@@ -51,6 +51,10 @@ jobs:
         run: |
           cd services/ping-agent
           go test -race ./...
+      - name: Validate targets files
+        run: |
+          cd services/ping-agent
+          for f in ../../config/targets/*.yml; do go run . validate "$f"; done
 
   python:
     runs-on: ubuntu-latest
@@ -67,7 +71,7 @@ jobs:
           pip install -r services/api-gateway/requirements-dev.txt
       - name: Python lint
         run: |
-          python -m py_compile services/api-gateway/*.py scripts/check_dashboard_queries.py scripts/reliability/*.py
+          python -m py_compile services/api-gateway/*.py scripts/*.py scripts/reliability/*.py
       - name: Python tests
         run: |
           python -m unittest discover -s services/api-gateway -p "test*.py"
@@ -90,6 +94,7 @@ jobs:
       - name: Prometheus config and alert rules
         run: |
           docker run --rm -v "$PWD/config:/etc/prometheus/rules:ro" -v "$PWD/config/prometheus.yml:/p.yml:ro" \
+            -v "$PWD/config/agents.yml:/etc/prometheus/agents.yml:ro" \
             --entrypoint promtool prom/prometheus:v2.54.1 check config /p.yml
       - name: Alert rule unit tests
         run: |
@@ -98,7 +103,7 @@ jobs:
       - name: Alertmanager config
         run: |
           docker run --rm -v "$PWD/config:/c:ro" --entrypoint amtool prom/alertmanager:v0.27.0 \
-            check-config /c/alertmanager.yml
+            check-config /c/alertmanager.yml /c/alertmanager.demo.yml
       - name: Grafana dashboard is valid JSON
         run: python3 -m json.tool monitoring/grafana-dashboard.json > /dev/null
 

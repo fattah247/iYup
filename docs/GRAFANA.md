@@ -2,21 +2,24 @@
 
 ## The dashboard
 
-`iYup uptime overview` (uid `iyup-overview`) is Grafana's home dashboard in Docker Compose and Helm. Every panel follows the **Target** variable (`label_values(ping_target_info, target)`), so it works for any `PING_TARGET_URLS`. Nothing is hardcoded to particular sites.
+`iYup uptime overview` (uid `iyup-overview`) is Grafana's home dashboard in Docker Compose and Helm. Every panel follows the **Target** variable (`label_values(ping_target_info, target)`), so it works for whatever the targets file holds. Nothing is hardcoded to particular sites.
+
+"Up" on this dashboard is the region majority (`iyup:target_up:quorum`), the same series the alerts, `/history` and `/slo` use, so the dashboard cannot disagree with the pager.
 
 Sections, in the order an operator asks:
 
 | Section | Answers |
 |---|---|
-| Right now | How many targets are up, down or stale? Any alerts firing? A table with one row per target: state, last result (the reason), how long in this state, check age, latency, HTTP code, uptime over the time range, and certificate days. Down targets sort first. |
-| History | When was each target up or down? A state timeline of the agent's verdict, with gaps where there was no data. |
+| Right now | How many targets are up, down, slow or stale? Any alerts firing (not counting the always-on `Watchdog`)? A table with one row per target: state, last result (the reason), failing regions, how long in this state, check age, latency, HTTP code, uptime over the time range, 30-day error budget left, and certificate days. Down targets sort first. |
+| History | When was each target up, slow or down? A state timeline of the majority verdict, and below it each region's own verdict, so a regional failure is visible at a glance. Gaps mean no data. |
+| Error budgets | How much of each target's 30-day budget is left, and how fast is it burning? The burn-rate panel is log scale with the 14.4x paging line drawn in. |
 | Latency | p95 per target, and where the latest check's time went (DNS, TCP, TLS, server). |
-| Early warnings | Retries per hour (failures retries absorbed, a sign of trouble ahead) and certificate days left. |
-| Monitoring pipeline | Is Prometheus scraping the agent and the gateway? Check interval, staleness budget, the age of each target's last check against the stale line, and the gateway's own traffic and latency. |
+| Early warnings | Retries per hour (failures retries absorbed, a sign of trouble ahead), certificate days left, and domain registration days left. |
+| Monitoring pipeline | How many agents (regions) can Prometheus scrape, and the gateway? Shortest interval, longest staleness budget, the age of each target's last check against the stale line, and the gateway's own traffic and latency. |
 
-The summary tiles stay neutral when things are fine and turn red or amber only when something needs attention. The colours match the status page: sage for up, brick for down, honey for warnings, lavender for unknown.
+The summary tiles stay neutral when things are fine and turn red or amber only when something needs attention. The colours match the status page: sage for up, brick for down, honey for slow and warnings, lavender for unknown.
 
-The "Target down" annotation marks the moments targets went down on the time-series panels. Toggle it in the dashboard controls.
+The "Target down" annotation marks the moments targets went down, by region majority, on the time-series panels. Toggle it in the dashboard controls.
 
 ## Provisioning
 
@@ -46,7 +49,7 @@ Run every query in the dashboard against Prometheus, with the variables expanded
 python3 scripts/check_dashboard_queries.py http://localhost:9090
 ```
 
-Each query reports `OK` with its series count, `EMPTY`, or `ERROR` with the expanded query. Some panels are legitimately empty, for example "Retries per hour" when nothing needed a retry. The script reads the queries from the dashboard file itself, so it cannot drift from what Grafana runs.
+Each query reports `OK` with its series count, `EMPTY`, or `ERROR` with the expanded query. Some panels are legitimately empty, for example "Retries per hour" when nothing needed a retry, or "Domain registration days left" when the targets file lists no domains. The script reads the queries from the dashboard file itself, so it cannot drift from what Grafana runs.
 
 For a broader data-quality pass:
 

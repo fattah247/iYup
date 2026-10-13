@@ -164,7 +164,8 @@ def validate_success_failure_consistency(expected_targets: List[str]) -> bool:
         value = r.get("value", [])
         if len(value) >= 2:
             try:
-                success_by_target[target] = float(value[1])
+                # One series per region: a target's checks are the sum.
+                success_by_target[target] = success_by_target.get(target, 0.0) + float(value[1])
             except (TypeError, ValueError):
                 pass
     
@@ -175,7 +176,7 @@ def validate_success_failure_consistency(expected_targets: List[str]) -> bool:
         value = r.get("value", [])
         if len(value) >= 2:
             try:
-                failure_by_target[target] = float(value[1])
+                failure_by_target[target] = failure_by_target.get(target, 0.0) + float(value[1])
             except (TypeError, ValueError):
                 pass
     
@@ -220,7 +221,7 @@ def validate_availability_calculation(expected_targets: List[str]) -> bool:
             if len(value) >= 2:
                 try:
                     availability = float(value[1])
-                    if availability < 0 or availability > 100:
+                    if availability < -1e-9 or availability > 100 + 1e-9:  # allow float rounding
                         add_issue("ERROR", f"Invalid availability for {target}: {availability}% (should be 0-100)")
                     else:
                         print(f"  ✅ {target}: {availability:.1f}% availability (5m)")
@@ -244,7 +245,14 @@ def validate_latency_metrics(expected_targets: List[str]) -> bool:
         
         results = data.get("result", [])
         if len(results) == 0:
-            add_issue("WARNING", f"No latency histogram data for {target}")
+            # Latency is recorded only when a response arrived, so a target
+            # that has never answered (connection refused, timeouts) has none.
+            up = query_prometheus(f'max(ping_up{{target="{target}"}})')
+            never_answered = up and up.get("result") and float(up["result"][0]["value"][1]) == 0
+            if never_answered:
+                print(f"  ➖ {target}: down without a response, so no latency (expected)")
+            else:
+                add_issue("WARNING", f"No latency histogram data for {target}")
             continue
         
         # Check average latency calculation
