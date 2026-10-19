@@ -29,7 +29,7 @@ Use this table to see which repo claims have command output, screenshots, or bot
 | Alerts survive agent restarts | Verified | rebuilding both agents while alerts fired | Every firing alert kept its start time; no false resolve was sent |
 | Domain expiry | Verified | demo overlay | `example.com` registration read over RDAP: 304 days |
 | Dashboard queries | Verified | `python3 scripts/check_dashboard_queries.py` against the demo stack | 38 queries returned data, 1 legitimately empty (no target went down in the range), 0 errors |
-| Data quality | Verified | `python3 scripts/validate_prometheus_data.py` against the demo stack | 0 errors; its only warnings are the high failure rates of the targets the demo keeps down on purpose. Counters now exist at zero from startup, so `success + failure` works for targets that never failed |
+| Check counters from startup | Verified | `TestPublishConfigPerTarget`; the demo stack's `/metrics` | A target that never failed reports `ping_failure_total 0` rather than no series, so `success + failure` works from the first check |
 | Helm Alertmanager config | Verified | `helm template` with every receiver set, checked with `amtool check-config` and `amtool config routes test` | Same routes as Compose: `page`, `notify`, `heartbeat` |
 | Helm alert rules | Verified | rendered ConfigMap run through `promtool test rules` | Same file as Compose, through a symlink |
 | Helm checks as code | Verified | `helm template --set-json checks=...`, rendered file run through `ping-agent validate` | |
