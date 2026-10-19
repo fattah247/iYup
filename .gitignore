@@ -7,7 +7,6 @@ config/secrets/
 .env.local
 .env.*.local
 charts/iyup/values.local.yaml
-monitoring/alloy.hcl
 
 # Python
 __pycache__/
