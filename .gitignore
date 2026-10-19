@@ -1,134 +1,42 @@
-# Secrets and sensitive files
-k8s/alertmanager-secret.yaml
-config/*.local.yml
-config/secrets/
-*.env
+# Secrets and local configuration
 .env
+*.env
 .env.local
 .env.*.local
+config/*.local.yml
+config/secrets/
 charts/iyup/values.local.yaml
+*.kubeconfig
+kubeconfig
 
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
 .venv/
 venv/
-ENV/
-env/
-.venv
-venv
-ENV
-env
-
-# Testing
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
-.coverage.*
 htmlcov/
-.tox/
-.nox/
-.hypothesis/
-.pytest_cache
-.mypy_cache
-.ruff_cache
-*.cover
-*.py,cover
-.hypothesis/
-
-# IDEs and editors
-# .vscode/  # Keep .vscode/settings.json for Helm template syntax highlighting
-.idea/
-*.swp
-*.swo
-*~
-.project
-.classpath
-.settings/
-*.sublime-project
-*.sublime-workspace
-
-# OS files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-*.log
 
 # Go
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+services/ping-agent/ping-agent
 *.test
 *.out
 go.work
 go.work.sum
 
-# Build artifacts
-*.o
-*.a
-*.lib
-*.dylib
-*.dll
-*.so
-
-# Temporary files
-*.tmp
-*.temp
-*.bak
+# Editors and OS (.vscode/settings.json is tracked: it maps Helm templates for syntax highlighting)
+.idea/
 *.swp
 *~
-.cache/
+.DS_Store
+Thumbs.db
 
-# Kubernetes
-*.kubeconfig
-kubeconfig
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
-*.tfvars
-*.tfvars.json
-
-# Reports and logs
-reliability_test_report.json
+# Logs and scratch space
 *.log
 logs/
-
-# Local development
-local/
 tmp/
 temp/
-
-# Local build output
-services/ping-agent/ping-agent
+local/
