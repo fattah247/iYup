@@ -14,7 +14,9 @@ API_DIR = os.path.dirname(__file__)
 if API_DIR not in sys.path:
     sys.path.insert(0, API_DIR)
 
-os.environ.pop("PING_TARGET_URLS", None)
+# main calls load_dotenv(), which would read a developer's .env; values already
+# in the environment win, so pin the ones that change behavior.
+os.environ.update({"PING_TARGET_URLS": "", "PROMETHEUS_QUERY_CACHE_SECONDS": "15"})
 logging.getLogger("iyup.api").setLevel(logging.ERROR)  # expected upstream failures are tested, not logged
 import main  # noqa: E402
 import maintenance as mw  # noqa: E402
@@ -67,6 +69,17 @@ def agent_text(now=NOW, region=None, a_up=1, b_up=0, a_slow=0, per_target=True):
     out += series("ping_tls_duration_seconds", A, 0.019)
     for le, count in [("0.025", 10), ("0.05", 60), ("0.1", 90), ("0.25", 95), ("0.5", 98), ("1", 100), ("+Inf", 100)]:
         out += f'ping_latency_seconds_bucket{{target="{A}",le="{le}"{reg}}} {count}\n'
+    return out
+
+
+def region_text(region, target=A, up=0, reason="timeout", status=None, name="Alpha"):
+    """One region's minimal view of one freshly checked target."""
+    labels = f'target="{target}",region="{region}"'
+    out = f'ping_target_info{{target="{target}",name="{name}",kind="http",region="{region}"}} 1\n'
+    out += f"ping_up{{{labels}}} {up}\nping_last_check_timestamp_seconds{{{labels}}} {NOW - 5}\n"
+    out += f'ping_last_result{{{labels},reason="{reason}"}} 1\n'
+    if status:
+        out += f"ping_last_status_code{{{labels}}} {status}\n"
     return out
 
 
@@ -283,6 +296,25 @@ class TestRegionQuorum(unittest.TestCase):
         row = snap.target_status(A, snaps, NOW)
         self.assertEqual((row["state"], row["reason"], row["regions_failing"]), ("down", "timeout", 2))
 
+    def test_down_details_come_from_a_region_with_the_common_reason(self):
+        snaps = snapshots(
+            region_text("lab-a", reason="timeout"),
+            region_text("lab-b", reason="http_5xx", status=503),
+            region_text("lab-c", reason="http_5xx", status=503),
+        )
+        row = snap.target_status(A, snaps, NOW)
+        self.assertEqual((row["state"], row["reason"], row["http_status"]), ("down", "http_5xx", 503))
+
+    def test_tied_reasons_go_to_the_first_agent(self):
+        snaps = snapshots(region_text("lab-a", reason="timeout"), region_text("lab-b", reason="http_5xx", status=503))
+        row = snap.target_status(A, snaps, NOW)
+        self.assertEqual((row["reason"], row["http_status"]), ("timeout", None))
+
+    def test_the_first_agent_that_names_a_target_names_it_everywhere(self):
+        snaps = snapshots(region_text("lab-a", up=1, reason="ok", name=""), region_text("lab-b", up=1, reason="ok", name="Alpha"))
+        self.assertEqual(snap.target_names(snaps), {A: "Alpha"})
+        self.assertEqual(snap.target_status(A, snaps, NOW)["name"], "Alpha")
+
     def test_stale_regions_do_not_vote(self):
         snaps = snapshots(agent_text(region="lab-a", a_up=0), agent_text(region="lab-b", now=NOW - 600))
         row = snap.target_status(A, snaps, NOW)
@@ -356,7 +388,7 @@ class TestDurations(unittest.TestCase):
             self.assertEqual(promql.parse_duration(text), seconds)
 
     def test_invalid(self):
-        for text in ["abc", "5mm", "1", "m5", "", "5m; drop table", "5m\n1h", "0m", "-5m"]:
+        for text in ["abc", "5mm", "1", "m5", "", "5m; drop table", "5m\n1h", "5m\n", "0m", "-5m"]:
             with self.assertRaises(ValueError, msg=text):
                 promql.parse_duration(text)
 
@@ -475,10 +507,6 @@ class TestAvailabilityHistory(unittest.TestCase):
         self.assertEqual((row_a["availability"], row_a["latency_p95_ms"]), (87.5, 212.5))
         self.assertEqual(row_b["buckets"], [None] * 4)
 
-    def test_rejects_buckets_finer_than_scrapes(self):
-        with self.assertRaises(ValueError):
-            promql.availability_history(FakeAPI(), [A], 600, 100, NOW)
-
 
 def slo_instant(query):
     if "objective" in query:
@@ -590,6 +618,13 @@ class TestRoutes(GatewayState):
         self.assertEqual(body["targets"][1]["reason"], "not_monitored")
         self.assertEqual(self.client.get("/targets").json()["source"], "config")
 
+    def test_configured_targets_keep_the_agents_names(self):
+        main.CONFIGURED_TARGETS = [A, B]
+        self.upstreams(ranged=lambda q, s, e, st: matrix(A, [(int(s), 1)]))
+        self.assertEqual(self.client.get("/status").json()["targets"][0]["name"], "Alpha")
+        self.assertEqual(self.client.get("/targets").json()["targets"][0]["name"], "Alpha")
+        self.assertEqual(self.client.get("/history?window=1h&buckets=4").json()["targets"][0]["name"], "Alpha")
+
     def test_targets_discovered_from_agent(self):
         self.upstreams()
         body = self.client.get("/targets").json()
@@ -600,6 +635,13 @@ class TestRoutes(GatewayState):
         resp = self.client.get("/targets/https%3A%2F%2Fa.example")
         self.assertEqual((resp.status_code, resp.json()["success"], resp.json()["failures"]), (200, 90, 10))
         self.assertEqual(self.client.get("/targets/https%3A%2F%2Fnope.example").status_code, 404)
+
+    def test_target_ids_are_decoded_once(self):
+        # uvicorn decodes the request path once before routing, so the handler
+        # gets "%20" for "%2520". (TestClient decodes twice, hence the direct call.)
+        target = "https://a.example/a%20b"
+        self.upstreams(agents={AGENT_1: region_text("lab-a", target=target, up=1, reason="ok")})
+        self.assertEqual(main.target_detail(target)["url"], target)
 
     def test_uptime_summary_adds_regions(self):
         self.upstreams(agents={AGENT_1: agent_text(region="lab-a"), AGENT_2: agent_text(region="lab-b")})

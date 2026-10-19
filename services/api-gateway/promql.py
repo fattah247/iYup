@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 import requests
 
-DURATION_PATTERN = re.compile(r"^(\d+)([smhdw])$")
+DURATION_PATTERN = re.compile(r"(\d+)([smhdw])")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 # Prometheus refuses range queries returning more than 11,000 points per series.
@@ -37,7 +37,7 @@ class PrometheusError(Exception):
 
 def parse_duration(text: str) -> int:
     """Parse a PromQL-style duration such as ``5m`` or ``7d`` into seconds."""
-    match = DURATION_PATTERN.match(text)
+    match = DURATION_PATTERN.fullmatch(text)
     if not match:
         raise ValueError(
             f"Invalid window '{text}'. Use a number followed by s/m/h/d/w (e.g. 5m, 1h, 24h, 7d)."
@@ -187,11 +187,6 @@ def availability_history(
     put between refreshes; the newest bucket is still filling up.
     """
     step = window_seconds // buckets
-    if step < MIN_STEP_SECONDS:
-        raise ValueError(
-            f"Buckets of {window_seconds / buckets:g}s are finer than the {MIN_STEP_SECONDS}s scrape interval; "
-            "use fewer buckets or a longer window."
-        )
     end = math.ceil(now / step) * step
     first = end - (buckets - 1) * step
 
@@ -218,7 +213,6 @@ def availability_history(
             }
         )
     return {
-        "window_seconds": window_seconds,
         "bucket_seconds": step,
         "start": end - buckets * step,
         "end": end,
@@ -236,8 +230,6 @@ def find_outages(api: PrometheusAPI, targets: list[str], window_seconds: int, no
     in the data with the target down on both sides (an agent restart) does not
     split an outage; a longer gap ends it at the last down observation.
     """
-    if window_seconds < 4 * MIN_STEP_SECONDS:
-        raise ValueError("Outage windows must be at least 1m.")
     step = max(MIN_STEP_SECONDS, math.ceil(window_seconds / MAX_POINTS))
     end = math.floor(now / step) * step
     start = end - window_seconds
@@ -370,7 +362,7 @@ def slo_report(api: PrometheusAPI, targets: list[str], window_seconds: int, now:
             if target in burn_6h:
                 row["burn_rate_6h"] = round(burn_6h[target] / budget, 2)
         rows.append(row)
-    return {"window_seconds": window_seconds, "targets": rows}
+    return {"targets": rows}
 
 
 def _pct(fraction: float | None) -> float | None:

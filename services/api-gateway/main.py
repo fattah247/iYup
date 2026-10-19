@@ -3,7 +3,6 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import unquote
 
 import requests
 from dotenv import load_dotenv
@@ -195,27 +194,20 @@ def fetch_snapshots() -> tuple[list[snap.AgentSnapshot], list[dict]]:
 def resolve_targets(snapshots: list[snap.AgentSnapshot]) -> list[str]:
     if CONFIGURED_TARGETS:
         return CONFIGURED_TARGETS
-    names: dict[str, str] = {}
-    for s in snapshots:
-        for url in s.target_urls():
-            names.setdefault(url, s.configured.get(url, {}).get("name") or snap.display_name(url))
-        for url, info in s.configured.items():
-            if info.get("name"):
-                names[url] = info["name"]
-    return sorted(names, key=lambda url: (names[url].lower(), url))
+    names = snap.target_names(snapshots)
+    urls = {url for s in snapshots for url in s.target_urls()}
+    return sorted(urls, key=lambda url: (_name(url, names).lower(), url))
 
 
-def current_targets_for_history() -> tuple[list[str], dict[str, str]]:
-    """Targets (and their names) to report history for. History can outlive
-    the agents, so if none is reachable fall back to whatever targets
-    Prometheus has data for."""
-    if CONFIGURED_TARGETS:
-        return CONFIGURED_TARGETS, {}
+def known_targets() -> tuple[list[str], dict[str, str]]:
+    """Targets and their names without requiring an agent: history can outlive
+    the agents, so if none is reachable, history endpoints fall back to
+    whatever targets Prometheus has data for."""
     try:
         snapshots = fetch_snapshots()[0]
     except HTTPException:
-        return [], {}
-    return resolve_targets(snapshots), _names(snapshots)
+        return CONFIGURED_TARGETS, {}
+    return resolve_targets(snapshots), snap.target_names(snapshots)
 
 
 def _name(url: str, names: dict[str, str]) -> str:
@@ -248,6 +240,12 @@ def _maintenance_view(window: dict) -> dict:
     }
 
 
+def _attach_maintenance(row: dict, windows: list[dict]) -> dict:
+    window = mw.maintenance_for(row["url"], windows)
+    row["maintenance"] = _maintenance_view(window) if window else None
+    return row
+
+
 def prometheus() -> promql.PrometheusAPI:
     if not PROMETHEUS_URL:
         raise HTTPException(status_code=501, detail="PROMETHEUS_URL is not configured")
@@ -262,15 +260,6 @@ def parse_window(window: str, max_seconds: int | None = None) -> int:
     if max_seconds is not None and seconds > max_seconds:
         raise HTTPException(status_code=400, detail=f"Window '{window}' is longer than the {max_seconds // 86400}d maximum.")
     return seconds
-
-
-def _names(snapshots: list[snap.AgentSnapshot]) -> dict[str, str]:
-    names: dict[str, str] = {}
-    for s in snapshots:
-        for url, info in s.configured.items():
-            if info.get("name"):
-                names[url] = info["name"]
-    return names
 
 
 @app.get("/", include_in_schema=False)
@@ -306,16 +295,11 @@ def status():
     snapshots, health = fetch_snapshots()
     windows, alertmanager = maintenance_windows()
     now = time.time()
-    rows = []
-    for url in resolve_targets(snapshots):
-        row = snap.target_status(url, snapshots, now)
-        window = mw.maintenance_for(url, windows)
-        row["maintenance"] = _maintenance_view(window) if window else None
-        rows.append(row)
+    rows = [_attach_maintenance(snap.target_status(url, snapshots, now), windows) for url in resolve_targets(snapshots)]
 
     by_url = {row["url"]: row["name"] for row in rows}
     published = []
-    for window in sorted(windows, key=lambda w: (not w["active"], w["starts_at"])):
+    for window in windows:
         names = [name for url, name in by_url.items() if mw.applies_to(window, url)]
         if names:
             published.append({**_maintenance_view(window), "targets": names})
@@ -338,27 +322,26 @@ def status():
 @app.get("/targets", response_model=TargetsResponse, summary="Targets being reported")
 def targets():
     if CONFIGURED_TARGETS:
-        return {"source": "config", "targets": [{"url": u, "name": snap.display_name(u)} for u in CONFIGURED_TARGETS]}
-    snapshots, _ = fetch_snapshots()
-    names = _names(snapshots)
+        urls, names = known_targets()
+    else:
+        snapshots, _ = fetch_snapshots()
+        urls, names = resolve_targets(snapshots), snap.target_names(snapshots)
     return {
-        "source": "agent",
-        "targets": [{"url": u, "name": names.get(u) or snap.display_name(u)} for u in resolve_targets(snapshots)],
+        "source": "config" if CONFIGURED_TARGETS else "agent",
+        "targets": [{"url": u, "name": _name(u, names)} for u in urls],
     }
 
 
 @app.get("/targets/{target_url:path}", response_model=TargetStatus, summary="Current state of one target")
 def target_detail(target_url: str):
-    target_url = unquote(target_url)
+    # The server has already decoded the path once; decoding again would turn
+    # an id containing "%20" into one containing a space.
     if CONFIGURED_TARGETS and target_url not in CONFIGURED_TARGETS:
         raise HTTPException(status_code=404, detail=f"Target '{target_url}' is not monitored")
     snapshots, _ = fetch_snapshots()
     if target_url not in resolve_targets(snapshots):
         raise HTTPException(status_code=404, detail=f"Target '{target_url}' is not monitored")
-    row = snap.target_status(target_url, snapshots, time.time())
-    window = mw.maintenance_for(target_url, maintenance_windows()[0])
-    row["maintenance"] = _maintenance_view(window) if window else None
-    return row
+    return _attach_maintenance(snap.target_status(target_url, snapshots, time.time()), maintenance_windows()[0])
 
 
 def _uptime_rows(urls: list[str], success: dict[str, float], failures: dict[str, float]) -> list[dict]:
@@ -397,7 +380,7 @@ def uptime_summary_windowed(window: str = "5m"):
         success, failures = promql.windowed_counts(api, window)
     except promql.PrometheusError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    urls = current_targets_for_history()[0] or sorted(set(success) | set(failures))
+    urls = known_targets()[0] or sorted(set(success) | set(failures))
     return {"window": window, "targets": _uptime_rows(urls, success, failures)}
 
 
@@ -416,12 +399,18 @@ def history(
     buckets: int = Query(48, ge=1, le=200, description="Number of buckets the window is split into"),
 ):
     window_seconds = parse_window(window, MAX_HISTORY_SECONDS)
+    if window_seconds // buckets < promql.MIN_STEP_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Buckets of {window_seconds / buckets:g}s are finer than the {promql.MIN_STEP_SECONDS}s scrape "
+                "interval; use fewer buckets or a longer window."
+            ),
+        )
     api = prometheus()
-    urls, names = current_targets_for_history()
+    urls, names = known_targets()
     try:
         data = promql.availability_history(api, urls, window_seconds, buckets, time.time())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except promql.PrometheusError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
@@ -448,13 +437,13 @@ def outages(
     limit: int = Query(50, ge=1, le=500, description="Maximum outages to list; totals always cover all of them"),
 ):
     window_seconds = parse_window(window, MAX_HISTORY_SECONDS)
+    if window_seconds < 60:
+        raise HTTPException(status_code=400, detail="Outage windows must be at least 1m.")
     api = prometheus()
     now = time.time()
-    urls, names = current_targets_for_history()
+    urls, names = known_targets()
     try:
         data = promql.find_outages(api, urls, window_seconds, now)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except promql.PrometheusError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -501,7 +490,7 @@ def slo(window: str = "30d"):
     if window_seconds < 3600:
         raise HTTPException(status_code=400, detail="SLO windows must be at least 1h.")
     api = prometheus()
-    urls, names = current_targets_for_history()
+    urls, names = known_targets()
     try:
         data = promql.slo_report(api, urls, window_seconds, time.time())
     except promql.PrometheusError as exc:

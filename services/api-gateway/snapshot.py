@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import urlsplit
 
 from prometheus_client.parser import text_string_to_metric_families
@@ -75,8 +76,7 @@ class AgentSnapshot:
     region: str = DEFAULT_REGION
     targets: dict[str, TargetMetrics] = field(default_factory=dict)
     configured: dict[str, dict[str, str]] = field(default_factory=dict)  # target -> {name, kind}
-    # Agent-wide values from agents that predate per-target settings.
-    interval_seconds: float | None = None
+    # Agent-wide staleness budget from agents that predate per-target settings.
     stale_after_seconds: float | None = None
 
     def target_urls(self) -> list[str]:
@@ -97,9 +97,7 @@ def parse_agent_metrics(text: str) -> AgentSnapshot:
                 snapshot.region = labels["region"]
             target = labels.get("target")
             if not target:
-                if name == "ping_interval_seconds":
-                    snapshot.interval_seconds = value
-                elif name == "ping_stale_after_seconds":
+                if name == "ping_stale_after_seconds":
                     snapshot.stale_after_seconds = value
                 continue
             if name == "ping_target_info":
@@ -179,6 +177,17 @@ def _ms(seconds: float | None, digits: int = 2) -> float | None:
     return round(seconds * 1000, digits) if seconds is not None else None
 
 
+def _configured(snapshots: list[AgentSnapshot], url: str, key: str) -> str:
+    """The first agent's non-empty configured value. Agents normally agree;
+    when they do not, every endpoint must still show the same name."""
+    return next((s.configured[url][key] for s in snapshots if s.configured.get(url, {}).get(key)), "")
+
+
+def target_names(snapshots: list[AgentSnapshot]) -> dict[str, str]:
+    urls = {url for s in snapshots for url in s.configured}
+    return {url: name for url in urls if (name := _configured(snapshots, url, "name"))}
+
+
 def availability_percent(success: float, failures: float) -> float | None:
     """Share of successful checks; None when there were no checks at all,
     because "no data" is not "0% available"."""
@@ -186,8 +195,9 @@ def availability_percent(success: float, failures: float) -> float | None:
     return (success / total) * 100 if total > 0 else None
 
 
-def region_status(url: str, snapshot: AgentSnapshot, now: float) -> dict[str, object] | None:
-    """One agent's view of one target, or None if that agent does not know it."""
+def region_status(url: str, snapshot: AgentSnapshot, now: float) -> tuple[dict[str, Any], TargetMetrics] | None:
+    """One agent's view of one target and the metrics behind it, or None if
+    that agent does not know the target."""
     metrics = snapshot.targets.get(url)
     if metrics is None and url not in snapshot.configured:
         return None
@@ -201,7 +211,7 @@ def region_status(url: str, snapshot: AgentSnapshot, now: float) -> dict[str, ob
         state, reason = STATE_UNKNOWN, m.reason
     else:
         state, reason = (STATE_UP if m.up == 1 else STATE_DOWN), m.reason
-    return {
+    view = {
         "region": snapshot.region,
         "state": state,
         "reason": reason,
@@ -211,13 +221,13 @@ def region_status(url: str, snapshot: AgentSnapshot, now: float) -> dict[str, ob
         "latency_ms": _ms(m.last_latency, 1),
         "last_checked_at": iso(m.last_check),
         "last_checked_seconds_ago": round(age, 1) if age is not None else None,
-        "_metrics": m,
     }
+    return view, m
 
 
-def target_status(url: str, snapshots: list[AgentSnapshot], now: float) -> dict[str, object]:
-    regions = [r for r in (region_status(url, s, now) for s in snapshots) if r is not None]
-    info = next((s.configured[url] for s in snapshots if url in s.configured), {})
+def target_status(url: str, snapshots: list[AgentSnapshot], now: float) -> dict[str, Any]:
+    seen = [r for r in (region_status(url, s, now) for s in snapshots) if r is not None]
+    regions = [view for view, _ in seen]
     fresh = [r for r in regions if r["state"] != STATE_UNKNOWN]
     down = [r for r in fresh if r["state"] == STATE_DOWN]
     up = [r for r in fresh if r["state"] == STATE_UP]
@@ -228,17 +238,19 @@ def target_status(url: str, snapshots: list[AgentSnapshot], now: float) -> dict[
         rep = regions[0]
         state, reason = STATE_UNKNOWN, rep["reason"]
     elif len(down) * 2 > len(fresh):
-        rep = down[0]
+        # The most common reason (ties go to the first agent), with status code
+        # and timings from a region that saw it.
         reasons = [r["reason"] for r in down]
-        state, reason = STATE_DOWN, max(set(reasons), key=reasons.count)
+        state, reason = STATE_DOWN, max(reasons, key=reasons.count)
+        rep = next(r for r in down if r["reason"] == reason)
     else:
         # The representative up region is the one with the median latency.
         rep = sorted(up, key=lambda r: r["latency_ms"] if r["latency_ms"] is not None else math.inf)[(len(up) - 1) // 2]
         state, reason = STATE_UP, rep["reason"]
     slow = state == STATE_UP and sum(1 for r in up if r["slow"]) * 2 > len(up)
 
-    all_metrics: list[TargetMetrics] = [r["_metrics"] for r in regions]
-    m: TargetMetrics = rep["_metrics"] if rep else TargetMetrics()
+    all_metrics = [m for _, m in seen]
+    m = next(m for view, m in seen if view is rep) if rep else TargetMetrics()
     success = sum(x.success for x in all_metrics)
     failures = sum(x.failures for x in all_metrics)
     buckets = merge_buckets([x.buckets for x in all_metrics])
@@ -248,12 +260,12 @@ def target_status(url: str, snapshots: list[AgentSnapshot], now: float) -> dict[
     stale_afters = [x.stale_after for x in all_metrics if x.stale_after is not None]
     thresholds = [x.degraded_threshold for x in all_metrics if x.degraded_threshold is not None]
     slos = [x.slo for x in all_metrics if x.slo is not None]
-    stale = bool(regions) and not fresh and any(r["stale"] for r in regions)
+    stale = not fresh and any(r["stale"] for r in regions)
 
     return {
         "url": url,
-        "name": info.get("name") or display_name(url),
-        "kind": info.get("kind") or infer_kind(url),
+        "name": _configured(snapshots, url, "name") or display_name(url),
+        "kind": _configured(snapshots, url, "kind") or infer_kind(url),
         "state": state,
         "up": state == STATE_UP,
         "slow": slow,
@@ -283,15 +295,19 @@ def target_status(url: str, snapshots: list[AgentSnapshot], now: float) -> dict[
         "slo_objective": round(max(slos) * 100, 4) if slos else None,
         "regions_total": len(fresh),
         "regions_failing": len(down),
-        "regions": [{k: v for k, v in r.items() if k != "_metrics"} for r in regions],
+        "regions": regions,
         "maintenance": None,
     }
 
 
-def overall_status(rows: list[dict[str, object]]) -> str:
+def _in_maintenance(row: dict[str, Any]) -> bool:
+    return bool((row.get("maintenance") or {}).get("active"))
+
+
+def overall_status(rows: list[dict[str, Any]]) -> str:
     """Worst known state wins, and we only vouch for what we can see.
     Targets in an active maintenance window are set aside."""
-    considered = [r for r in rows if not (r.get("maintenance") or {}).get("active")]
+    considered = [r for r in rows if not _in_maintenance(r)]
     if rows and not considered:
         return "maintenance"
     states = [r["state"] for r in considered]
@@ -305,15 +321,14 @@ def overall_status(rows: list[dict[str, object]]) -> str:
     return "operational"
 
 
-def summarize(rows: list[dict[str, object]]) -> dict[str, int]:
-    in_maintenance = [r for r in rows if (r.get("maintenance") or {}).get("active")]
-    others = [r for r in rows if r not in in_maintenance]
+def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
+    others = [r for r in rows if not _in_maintenance(r)]
     states = [r["state"] for r in others]
     return {
         "up": states.count(STATE_UP),
         "down": states.count(STATE_DOWN),
         "unknown": states.count(STATE_UNKNOWN),
         "slow": sum(1 for r in others if r.get("slow")),
-        "maintenance": len(in_maintenance),
+        "maintenance": len(rows) - len(others),
         "total": len(rows),
     }

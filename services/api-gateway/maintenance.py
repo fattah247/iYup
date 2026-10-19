@@ -33,7 +33,8 @@ def _matches(matcher: dict, value: str) -> bool:
 
 
 def windows_from_silences(silences: list[dict]) -> list[dict]:
-    """Active and upcoming maintenance windows with their target matchers."""
+    """Active and upcoming maintenance windows with their target matchers,
+    active ones first, then by start time."""
     windows = []
     for silence in silences:
         state = (silence.get("status") or {}).get("state")
@@ -53,7 +54,7 @@ def windows_from_silences(silences: list[dict]) -> list[dict]:
                 "comment": comment[len(MARKER):].strip(),
             }
         )
-    return windows
+    return sorted(windows, key=lambda w: (not w["active"], w["starts_at"]))
 
 
 def applies_to(window: dict, target: str) -> bool:
@@ -62,7 +63,4 @@ def applies_to(window: dict, target: str) -> bool:
 
 def maintenance_for(target: str, windows: list[dict]) -> dict | None:
     """The window that matters most for a target: an active one, else the next."""
-    applicable = [w for w in windows if applies_to(w, target)]
-    if not applicable:
-        return None
-    return min(applicable, key=lambda w: (not w["active"], w["starts_at"]))
+    return next((w for w in windows if applies_to(w, target)), None)
