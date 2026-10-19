@@ -112,7 +112,7 @@ Per domain (label `domain`): `ping_domain_expiry_days`, `ping_domain_expiry_last
 
 ## Helm
 
-The chart packages `ping-agent`, `api-gateway`, Prometheus (with the same rules), Grafana (with the datasource and dashboard provisioned), Alertmanager (with a volume for silences), `alert-logger`, and optional ingress and HPA resources. Checks come from the `checks` value, rendered into a ConfigMap, or from the plain `pingTargets` list.
+The chart packages `ping-agent`, `api-gateway`, Prometheus (with the same rules), Grafana (with the datasource and dashboard provisioned), Alertmanager (with a volume for silences), `alert-logger`, and an optional ingress. Checks come from the `checks` value, rendered into a ConfigMap, or from the plain `pingTargets` list.
 
 Alertmanager does not expand environment variables in its config. The chart therefore renders `alertmanager.yml` from values into a Secret, with the same routes and inhibitions as `config/alertmanager.yml`. Every alert also goes to `alert-logger`; email, Slack, Discord, Telegram, a generic webhook and the heartbeat URL are added only when configured.
 

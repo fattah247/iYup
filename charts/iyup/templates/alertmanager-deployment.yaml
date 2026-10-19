@@ -6,6 +6,8 @@ metadata:
     {{- include "iyup.labels" . | nindent 4 }}
     app.kubernetes.io/component: alertmanager
 spec:
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
