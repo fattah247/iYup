@@ -12,6 +12,10 @@ services:
       - PING_HTTP_METHOD=${PING_HTTP_METHOD:-GET}
       - PING_RANGE_REQUEST=${PING_RANGE_REQUEST:-true}
       - PING_REGION=${PING_REGION:-}
+      # Blank means the agent's own default.
+      - PING_SLO=${PING_SLO:-}
+      - PING_BODY_MAX_BYTES=${PING_BODY_MAX_BYTES:-}
+      - PING_RDAP_URL=${PING_RDAP_URL:-}
     volumes:
       - ./config/targets:/etc/iyup:ro
     ports:
