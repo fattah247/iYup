@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,16 +25,16 @@ const (
 
 var dnsRecords = map[string]bool{"A": true, "AAAA": true, "CNAME": true, "MX": true, "TXT": true, "NS": true}
 
-// target is one fully resolved check. ID is the stable metric label: the URL as
-// written for HTTP (placeholders unexpanded, so secrets never reach a label),
-// tcp:// or tls:// plus the address, or dns://host/RECORD.
+// target is one targets-file entry (or PING_TARGET_URLS URL) with defaults
+// applied and validated. ID is the stable metric label: the URL as written for
+// HTTP (placeholders unexpanded, so secrets never reach a label), tcp:// or
+// tls:// plus the address, or dns://host/RECORD.
 type target struct {
 	ID   string
 	Name string
 	Kind string
 
-	URL             string // as written
-	requestURL      string // with ${VAR} expanded
+	requestURL      string // the URL with ${VAR} expanded
 	Method          string
 	Headers         http.Header
 	FollowRedirects bool
@@ -188,7 +189,7 @@ func loadTargetsFile(path string, base baseDefaults) ([]target, []string, error)
 	}
 	var domains []string
 	for _, d := range file.Domains {
-		d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+		d = normalizeDNSName(d)
 		if d == "" || strings.ContainsAny(d, "/: ") || !strings.Contains(d, ".") {
 			problems = append(problems, fmt.Sprintf("domains: %q is not a domain name", d))
 			continue
@@ -263,7 +264,7 @@ func resolveTarget(defaults, spec targetSpec, base baseDefaults) (target, error)
 		}
 		t.BodyContains = merged.Expect.BodyContains
 		for _, a := range merged.Expect.Answers {
-			t.ExpectAnswers = append(t.ExpectAnswers, normalizeAnswer(a))
+			t.ExpectAnswers = append(t.ExpectAnswers, normalizeDNSName(a))
 		}
 	}
 
@@ -308,7 +309,6 @@ func (t *target) resolveHTTP(s targetSpec) error {
 		return errors.New("expect.body_contains needs method GET")
 	}
 	t.ID = s.URL
-	t.URL = s.URL
 	t.requestURL = expanded
 	t.Headers = http.Header{}
 	for name, value := range s.Headers {
@@ -346,7 +346,7 @@ func (t *target) resolveDNS(s targetSpec) error {
 	if s.Host == "" {
 		return errors.New("dns targets need a host")
 	}
-	t.Host = strings.TrimSuffix(strings.ToLower(s.Host), ".")
+	t.Host = normalizeDNSName(s.Host)
 	t.Record = strings.ToUpper(firstNonEmpty(s.Record, "A"))
 	if !dnsRecords[t.Record] {
 		return fmt.Errorf("record must be one of A, AAAA, CNAME, MX, TXT, NS, got %q", s.Record)
@@ -387,13 +387,8 @@ func mergeSpecs(d, s targetSpec) targetSpec {
 		m.Expect = d.Expect
 	}
 	if len(d.Headers) > 0 {
-		m.Headers = map[string]string{}
-		for k, v := range d.Headers {
-			m.Headers[k] = v
-		}
-		for k, v := range s.Headers {
-			m.Headers[k] = v
-		}
+		m.Headers = maps.Clone(d.Headers)
+		maps.Copy(m.Headers, s.Headers)
 	}
 	return m
 }
@@ -430,8 +425,10 @@ func durationOr(raw string, fallback time.Duration, field string) (time.Duration
 	return d, nil
 }
 
-func normalizeAnswer(a string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(a)), ".")
+// normalizeDNSName lowercases a name and drops the root dot, so "Example.com."
+// and "example.com" compare equal.
+func normalizeDNSName(name string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
 }
 
 func firstNonEmpty(values ...string) string {

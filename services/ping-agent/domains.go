@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,11 +58,7 @@ func (w domainWatcher) run(ctx context.Context) {
 
 // domainRetryAfter is the wait after the nth consecutive failed lookup.
 func domainRetryAfter(n int) time.Duration {
-	d := 5 * time.Minute << uint(n-1)
-	if d <= 0 || d > domainRefresh {
-		return domainRefresh
-	}
-	return d
+	return doubling(5*time.Minute, domainRefresh, n)
 }
 
 func (w domainWatcher) refresh(ctx context.Context, domain string, now time.Time) bool {
@@ -111,5 +108,5 @@ func (w domainWatcher) lookup(ctx context.Context, domain string) (time.Time, er
 			return time.Parse(time.RFC3339, e.Date)
 		}
 	}
-	return time.Time{}, fmt.Errorf("RDAP response has no expiration event")
+	return time.Time{}, errors.New("RDAP response has no expiration event")
 }

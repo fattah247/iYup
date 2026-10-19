@@ -126,9 +126,7 @@ func TestClassifyStatusDefaults(t *testing.T) {
 func TestBodyContains(t *testing.T) {
 	t.Parallel()
 	var sawRange atomic.Bool
-	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
 		if r.Header.Get("Range") != "" {
 			sawRange.Store(true)
 		}
@@ -142,10 +140,23 @@ func TestBodyContains(t *testing.T) {
 	if sawRange.Load() {
 		t.Error("a Range request was sent although the body is needed")
 	}
-	calls.Store(0)
 	res, _ := run(t, targetSpec{URL: srv.URL, Expect: &expectSpec{BodyContains: "maintenance"}}, nil)
 	if res.Up || res.Reason != reasonBodyMismatch || res.StatusCode != 200 || res.Attempts != 3 {
 		t.Fatalf("200 with the wrong body must be down (and retried): %+v", res)
+	}
+}
+
+func TestBodyThatStallsIsATimeout(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	res, _ := run(t, targetSpec{URL: srv.URL, Timeout: "200ms", Retries: intp(0), Expect: &expectSpec{BodyContains: "complete"}}, nil)
+	if res.Up || res.Reason != reasonTimeout || res.Err == nil || res.StatusCode != 200 {
+		t.Fatalf("got %+v, want a timeout while reading the body", res)
 	}
 }
 
@@ -184,10 +195,11 @@ func TestRedirectPolicy(t *testing.T) {
 
 func TestHeadersAndUserAgent(t *testing.T) {
 	t.Setenv("IYUP_TEST_TOKEN", "abc123")
-	var gotAuth, gotUA atomic.Value
+	var gotAuth, gotUA, gotRange atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth.Store(r.Header.Get("Authorization"))
 		gotUA.Store(r.Header.Get("User-Agent"))
+		gotRange.Store(r.Header.Get("Range"))
 	}))
 	defer srv.Close()
 	saved := userAgent
@@ -200,6 +212,9 @@ func TestHeadersAndUserAgent(t *testing.T) {
 	}
 	if ua, _ := gotUA.Load().(string); !strings.Contains(ua, "region=lab-b") {
 		t.Errorf("User-Agent %q does not name the region", ua)
+	}
+	if gotRange.Load() != "bytes=0-0" {
+		t.Errorf("Range = %q, want a one-byte request when nothing needs the body", gotRange.Load())
 	}
 }
 
@@ -257,9 +272,10 @@ func TestTCPCheck(t *testing.T) {
 	if res, _ := run(t, targetSpec{Type: "tcp", Address: closedPort(t), Retries: intp(0)}, nil); res.Up || res.Reason != reasonConnectionRefused {
 		t.Fatalf("closed port: %+v", res)
 	}
-	host, port, _ := net.SplitHostPort(addr)
-	if res, _ := run(t, targetSpec{Type: "tcp", Address: net.JoinHostPort("localhost", port)}, nil); !res.Up || res.Timings.DNS <= 0 {
-		t.Fatalf("by name (%s): %+v", host, res)
+	_, port, _ := net.SplitHostPort(addr)
+	byName := net.JoinHostPort("localhost", port)
+	if res, _ := run(t, targetSpec{Type: "tcp", Address: byName}, nil); !res.Up || res.Timings.DNS <= 0 {
+		t.Fatalf("by name (%s): %+v", byName, res)
 	}
 }
 
@@ -338,28 +354,31 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// Each target has its own loop, so a slow target cannot hold back the others,
-// even with a concurrency of one.
-func TestSlowTargetDoesNotStarveOthers(t *testing.T) {
+// Each target has its own loop: a target that hangs for the whole run holds
+// one concurrency slot, and the others keep being checked with the rest.
+func TestHungTargetDoesNotStarveOthers(t *testing.T) {
 	t.Parallel()
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(150 * time.Millisecond)
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
 	}))
-	defer slow.Close()
+	defer hung.Close()
 	fastA, _ := statusSequence(t, http.StatusOK)
 	fastB, _ := statusSequence(t, http.StatusOK)
 
-	var checks []*check
-	for _, u := range []string{slow.URL, fastA.URL, fastB.URL} {
+	checks := []*check{newCheck(mustTarget(t, targetSpec{URL: hung.URL, Timeout: "10s", Retries: intp(0)}), http.DefaultTransport)}
+	for _, u := range []string{fastA.URL, fastB.URL} {
 		checks = append(checks, newCheck(mustTarget(t, targetSpec{URL: u}), http.DefaultTransport))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2600*time.Millisecond)
 	defer cancel()
-	runScheduler(ctx, checks, 1, newRecorder())
-	for _, c := range checks {
+	runScheduler(ctx, checks, 2, newRecorder())
+	for _, c := range checks[1:] {
 		if v, ok := series(t, "ping_up", map[string]string{"target": c.t.ID}); !ok || v != 1 {
 			t.Errorf("%s: ping_up=%v exists=%v, want 1", c.t.ID, v, ok)
 		}
+	}
+	if _, ok := series(t, "ping_up", map[string]string{"target": hung.URL}); ok {
+		t.Error("the hung check, cut off by shutdown, recorded a verdict")
 	}
 }
 

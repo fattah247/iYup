@@ -15,45 +15,22 @@ func tcpAttempt(ctx context.Context, t target) checkResult {
 	ctx, cancel := context.WithTimeout(ctx, t.Timeout)
 	defer cancel()
 	start := time.Now()
-	host, port, _ := net.SplitHostPort(t.Address)
-	var phases phaseTimings
+	timings := &traceTimings{}
 
-	ips := []string{host}
-	if net.ParseIP(host) == nil {
-		dnsStart := time.Now()
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		if err != nil || len(addrs) == 0 {
-			if err == nil {
-				err = fmt.Errorf("no addresses for %s", host)
-			}
-			return checkResult{Reason: reasonDNS, Err: err, Latency: time.Since(start)}
-		}
-		phases.DNS = time.Since(dnsStart)
-		ips = ips[:0]
-		for _, a := range addrs {
-			ips = append(ips, a.IP.String())
-		}
-	}
-
-	// Try every address, as browsers do: a dual-stack name whose service only
-	// listens on IPv4 (or IPv6) is reachable, not refused.
-	connectStart := time.Now()
+	// The dialer tries every address the name resolves to, splitting the
+	// timeout between them, so a dual-stack name whose service listens on only
+	// one family is reachable, not refused.
 	var dialer net.Dialer
-	var conn net.Conn
-	var err error
-	for _, ip := range ips {
-		if conn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, port)); err == nil {
-			break
-		}
-	}
+	conn, err := dialer.DialContext(timings.attach(ctx), "tcp", t.Address)
 	if err != nil {
-		return checkResult{Reason: classifyError(err), Err: err, Latency: time.Since(start), Timings: phases}
+		return checkResult{Reason: classifyError(err), Err: err, Latency: time.Since(start), Timings: timings.snapshot()}
 	}
 	defer conn.Close()
-	phases.Connect = time.Since(connectStart)
+	phases := timings.snapshot()
 
 	res := checkResult{Up: true, Responded: true, Reason: reasonOK}
 	if t.TLS {
+		host, _, _ := net.SplitHostPort(t.Address)
 		tlsStart := time.Now()
 		tc := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
 		if err := tc.HandshakeContext(ctx); err != nil {
@@ -107,7 +84,7 @@ func dnsAttempt(ctx context.Context, t target) checkResult {
 	}
 	have := map[string]bool{}
 	for _, a := range answers {
-		have[normalizeAnswer(a)] = true
+		have[normalizeDNSName(a)] = true
 	}
 	for _, want := range t.ExpectAnswers {
 		if !have[want] {

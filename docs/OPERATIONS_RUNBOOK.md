@@ -17,7 +17,7 @@ PROM="http://localhost:${PROMETHEUS_PORT:-9090}"
 ```bash
 docker compose up -d --build      # start or update
 docker compose ps                 # containers and health
-docker compose logs -f ping-agent # check results: [UP] [DOWN] [RETRY] [OUTAGE] [RECOVERED] [SLOW] [DOMAIN]
+docker compose logs -f ping-agent # check results: [UP] [DOWN] [RETRY] [OUTAGE] [RECOVERED] [SLOW] [OVERRUN] [DOMAIN]
 docker compose down               # stop (data volumes are kept)
 ./scripts/verify-local.sh         # end-to-end check of the running stack
 ```
@@ -76,7 +76,7 @@ Each alert's `runbook` annotation links to its section below. Planned work: see 
 
 **Do:**
 
-1. `docker compose logs --tail 100 ping-agent`. Look for `[SLOW]` lines (checks longer than their interval).
+1. `docker compose logs --tail 100 ping-agent`. Look for `[OVERRUN]` lines (checks longer than their interval, including any wait for a free slot).
 2. If many targets time out at once and `PING_CONCURRENCY` is low, checks queue up. Raise the concurrency or lower the timeouts.
 3. If the logs have stopped entirely, restart the agent: `docker compose restart ping-agent`. `TargetDown` will not flap because of the restart.
 

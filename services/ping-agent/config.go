@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// config is everything the agent reads at startup, validated once so a typo
-// fails loudly instead of producing a target that is "down" forever.
+// config is everything the agent reads at startup. Targets are validated once,
+// so a typo fails loudly instead of producing a target that is "down" forever;
+// tuning variables that are unset or malformed fall back to their defaults.
 type config struct {
 	Targets     []target
 	Domains     []string
@@ -20,26 +21,21 @@ type config struct {
 	RDAPBase    string
 }
 
-const maxBackoff = 5 * time.Second
-
-// backoffBase is the pause before the first retry; it doubles per retry.
-var backoffBase = 500 * time.Millisecond
-
 // loadConfig reads targets from PING_TARGET_URLS when it is set (a quick
 // override, and the original interface), otherwise from PING_TARGETS_FILE,
 // otherwise it checks two public sites so a fresh checkout shows something.
 func loadConfig() (config, error) {
 	base := baseDefaults{
-		Interval:     getenvDurationSeconds("PING_INTERVAL_SECONDS", 30),
-		Timeout:      getenvDurationSeconds("PING_TIMEOUT_SECONDS", 10),
-		Retries:      getenvNonNegativeInt("PING_RETRY_COUNT", 2),
-		Method:       strings.ToUpper(getenvOrDefault("PING_HTTP_METHOD", http.MethodGet)),
+		Interval:     time.Duration(getenvInt("PING_INTERVAL_SECONDS", 30, 1)) * time.Second,
+		Timeout:      time.Duration(getenvInt("PING_TIMEOUT_SECONDS", 10, 1)) * time.Second,
+		Retries:      getenvInt("PING_RETRY_COUNT", 2, 0),
+		Method:       getenvOrDefault("PING_HTTP_METHOD", http.MethodGet),
 		UseRange:     getenvBool("PING_RANGE_REQUEST", true),
 		SLO:          getenvPercent("PING_SLO", 99.9) / 100,
-		MaxBodyBytes: int64(getenvInt("PING_BODY_MAX_BYTES", 65536)),
+		MaxBodyBytes: int64(getenvInt("PING_BODY_MAX_BYTES", 65536, 1)),
 	}
 	cfg := config{
-		Concurrency: getenvInt("PING_CONCURRENCY", 5),
+		Concurrency: getenvInt("PING_CONCURRENCY", 5, 1),
 		Region:      getenvOrDefault("PING_REGION", ""),
 		RDAPBase:    getenvOrDefault("PING_RDAP_URL", "https://rdap.org/domain/"),
 	}
@@ -57,7 +53,7 @@ func loadConfig() (config, error) {
 		cfg.Targets, cfg.Domains, cfg.Source = targets, domains, file
 		return cfg, nil
 	default:
-		urls = defaultTargets()
+		urls = []string{"https://google.com", "https://github.com"}
 		cfg.Source = "built-in defaults"
 	}
 
@@ -76,64 +72,30 @@ func loadConfig() (config, error) {
 	return cfg, nil
 }
 
-// backoffBefore returns the pause before retry number n (1-based).
-func backoffBefore(n int) time.Duration {
-	d := backoffBase << uint(n-1)
-	if d <= 0 || d > maxBackoff {
-		return maxBackoff
-	}
-	return d
-}
-
 // parseTargetsEnv splits a comma-separated list, trimming blanks and dropping
 // duplicates (a duplicated URL would otherwise be checked and counted twice).
 func parseTargetsEnv(value string) []string {
-	var targets []string
+	var urls []string
 	seen := map[string]bool{}
 	for _, raw := range strings.Split(value, ",") {
-		target := strings.TrimSpace(raw)
-		if target == "" || seen[target] {
+		url := strings.TrimSpace(raw)
+		if url == "" || seen[url] {
 			continue
 		}
-		seen[target] = true
-		targets = append(targets, target)
+		seen[url] = true
+		urls = append(urls, url)
 	}
-	return targets
+	return urls
 }
 
-func defaultTargets() []string {
-	return []string{"https://google.com", "https://github.com"}
-}
-
-func getenvDurationSeconds(name string, fallback int) time.Duration {
-	return time.Duration(getenvInt(name, fallback)) * time.Second
-}
-
-// getenvInt reads a positive integer, falling back on blanks and bad values.
-func getenvInt(name string, fallback int) int {
-	value, ok := parseEnvInt(name)
-	if !ok || value <= 0 {
+// getenvInt reads an integer of at least minimum, falling back on blanks and
+// bad values.
+func getenvInt(name string, fallback, minimum int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || value < minimum {
 		return fallback
 	}
 	return value
-}
-
-// getenvNonNegativeInt is getenvInt that also accepts 0, e.g. "no retries".
-func getenvNonNegativeInt(name string, fallback int) int {
-	value, ok := parseEnvInt(name)
-	if !ok || value < 0 {
-		return fallback
-	}
-	return value
-}
-
-func parseEnvInt(name string) (int, bool) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return 0, false
-	}
-	value, err := strconv.Atoi(raw)
-	return value, err == nil
 }
 
 func getenvPercent(name string, fallback float64) float64 {

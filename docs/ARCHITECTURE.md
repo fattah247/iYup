@@ -37,7 +37,7 @@ flowchart LR
 ## How a check becomes a verdict
 
 1. At startup the agent loads `config/targets/targets.yml` (or `PING_TARGET_URLS`). Every problem in the file is reported at once and stops the agent; a monitor that silently drops a target is worse than one that refuses to start.
-2. Each target runs in its own loop on its own `interval`. A shared semaphore caps checks in flight at `PING_CONCURRENCY`. First checks are spread over two seconds so a restart does not fire everything at once. A slow target can delay only itself, and if one check outlasts its interval the next starts immediately, with a log line.
+2. Each target runs in its own loop on its own `interval`. A shared semaphore caps checks in flight at `PING_CONCURRENCY`. First checks are spread over two seconds so a restart does not fire everything at once. A slow target never pushes back the others' schedules, though while it runs it holds one of those slots. If one check outlasts its interval, the next starts immediately, with an `[OVERRUN]` log line.
 3. Every attempt has its own `timeout`. Failures a second attempt might fix (timeouts, refused or reset connections, DNS errors, 5xx, body mismatches) are retried with exponential backoff; a 4xx, a rejected certificate or a wrong DNS answer is not.
 4. The outcome is classified into a closed set of reasons, so it is safe as a metric label. A successful check slower than `degraded_after` is marked slow.
 5. The recorder updates the metrics: up/down, slow, last result, status code, latency (only when a response arrived), connection phases (only those that completed), certificate expiry, retries, last-check time and state-change time.
