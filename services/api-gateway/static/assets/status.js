@@ -4,6 +4,7 @@ const WINDOWS = { "1h": 60, "24h": 48, "7d": 56 }; // window -> bucket count
 const WINDOW_WORDS = { "1h": "hour", "24h": "24 hours", "7d": "7 days" }; // "the last …"
 const AXIS_START = { "1h": "1 hour ago", "24h": "24 hours ago", "7d": "7 days ago" };
 const HISTORY_REFRESH_MS = 60_000;
+const SLO_WINDOW_DAYS = 30;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 const REASONS = {
@@ -106,6 +107,16 @@ function fmtWhen(iso, withDate) {
   return (withDate ? dateTimeFmt : timeFmt).format(date);
 }
 
+// A bare time is clear within the next day; further out it needs the date.
+function fmtUntil(iso) {
+  return fmtWhen(iso, secondsSince(iso) < -86400);
+}
+
+function listNames(names, shown = 2) {
+  if (names.length <= shown) return names.join(" and ");
+  return `${names.slice(0, shown).join(", ")} and ${plural(names.length - shown, "other")}`;
+}
+
 function secondsSince(iso) {
   return (Date.now() - new Date(iso).getTime()) / 1000;
 }
@@ -164,16 +175,18 @@ function announce(message) {
 
 function initialWindow() {
   const fromQuery = new URLSearchParams(location.search).get("window");
-  if (fromQuery in WINDOWS) return fromQuery;
+  if (Object.hasOwn(WINDOWS, fromQuery)) return fromQuery;
   try {
     const saved = localStorage.getItem("iyup.window");
-    if (saved in WINDOWS) return saved;
+    if (Object.hasOwn(WINDOWS, saved)) return saved;
   } catch {
     // Storage can be unavailable (private mode, blocked cookies); the default is fine.
   }
   return "24h";
 }
 
+// Rejects with an error carrying the HTTP status, or none when the request
+// never got an answer (network failure, timeout); describeError reads only that.
 async function getJSON(url) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -183,21 +196,12 @@ async function getJSON(url) {
       cache: "no-store",
       signal: controller.signal,
     });
-    let body = null;
-    try {
-      body = await response.json();
-    } catch {
-      // Non-JSON error page; fall through to the status code.
-    }
     if (!response.ok) {
-      const error = new Error(body && body.detail ? String(body.detail) : `HTTP ${response.status}`);
+      const error = new Error(`HTTP ${response.status}`);
       error.status = response.status;
       throw error;
     }
-    return body;
-  } catch (error) {
-    if (error.name === "AbortError") throw new Error("the request timed out");
-    throw error;
+    return await response.json();
   } finally {
     window.clearTimeout(timer);
   }
@@ -219,7 +223,7 @@ async function refreshHistory() {
   const [history, outages, slo] = await Promise.allSettled([
     getJSON(`/history?window=${w}&buckets=${WINDOWS[w]}`),
     getJSON(`/outages?window=${w}&limit=20`),
-    getJSON("/slo?window=30d"),
+    getJSON(`/slo?window=${SLO_WINDOW_DAYS}d`),
   ]);
   if (w !== state.window) return; // the window changed while we were waiting
   state.slo = slo.status === "fulfilled" ? slo.value : null;
@@ -235,18 +239,29 @@ function statusInterval() {
   return Math.min(60, Math.max(10, seconds)) * 1000;
 }
 
-function schedule() {
+// Status and history refresh on separate clocks; each re-arms only its own
+// timer, so the faster status refresh never postpones the history one.
+function scheduleStatus() {
   window.clearTimeout(state.timers.status);
-  window.clearTimeout(state.timers.history);
   if (document.hidden) return;
   state.timers.status = window.setTimeout(async () => {
     await refreshStatus();
-    schedule();
+    scheduleStatus();
   }, statusInterval());
+}
+
+function scheduleHistory() {
+  window.clearTimeout(state.timers.history);
+  if (document.hidden) return;
   state.timers.history = window.setTimeout(async () => {
     await refreshHistory();
-    schedule();
+    scheduleHistory();
   }, HISTORY_REFRESH_MS);
+}
+
+function schedule() {
+  scheduleStatus();
+  scheduleHistory();
 }
 
 async function refreshAll() {
@@ -263,29 +278,27 @@ async function refreshAll() {
 
 function heroCopy(status) {
   const { summary, targets } = status;
-  const names = (st) => targets.filter((t) => t.state === st).map((t) => t.name);
-  const list = (items) =>
-    items.length <= 2 ? items.join(" and ") : `${items.slice(0, 2).join(", ")} and ${plural(items.length - 2, "other")}`;
+  // Like the overall status, the headline sets targets in maintenance aside.
+  const watched = targets.filter((t) => !t.maintenance?.active);
+  const names = (pick) => watched.filter(pick).map((t) => t.name);
+  const aside = summary.maintenance ? ` ${plural(summary.maintenance, "target")} in planned maintenance.` : "";
 
   switch (status.status) {
-    case "operational": {
-      const up = summary.total - summary.maintenance;
-      const aside = summary.maintenance ? ` ${plural(summary.maintenance, "target")} in planned maintenance.` : "";
+    case "operational":
       return {
         headline: "Yup.",
-        subline: (up === 1 ? `${targets.find((t) => !t.maintenance?.active).name} is up.` : `All ${up} targets are up.`) + aside,
+        subline: (watched.length === 1 ? `${watched[0].name} is up.` : `All ${watched.length} targets are up.`) + aside,
       };
-    }
     case "degraded": {
-      const down = targets.filter((t) => t.state === "down" && !t.maintenance?.active).map((t) => t.name);
+      const down = names((t) => t.state === "down");
       if (!down.length) {
-        const slow = targets.filter((t) => t.slow).map((t) => t.name);
-        return { headline: "Yup… mostly.", subline: `Everything is up, but ${list(slow)} ${slow.length === 1 ? "is" : "are"} slow.` };
+        const slow = names((t) => t.slow);
+        return { headline: "Yup… mostly.", subline: `Everything is up, but ${listNames(slow)} ${slow.length === 1 ? "is" : "are"} slow.` };
       }
       const others = summary.up;
       return {
         headline: "Yup… mostly.",
-        subline: `${list(down)} ${down.length === 1 ? "is" : "are"} down.${others ? ` ${plural(others, "other")} ${others === 1 ? "is" : "are"} up.` : ""}`,
+        subline: `${listNames(down)} ${down.length === 1 ? "is" : "are"} down.${others ? ` ${plural(others, "other")} ${others === 1 ? "is" : "are"} up.` : ""}`,
       };
     }
     case "maintenance":
@@ -293,17 +306,17 @@ function heroCopy(status) {
     case "outage":
       return {
         headline: "Nope.",
-        subline: summary.total === 1 ? `${targets[0].name} is down.` : `All ${summary.total} targets are down.`,
+        subline: (watched.length === 1 ? `${watched[0].name} is down.` : `All ${watched.length} targets are down.`) + aside,
       };
     default: {
       if (summary.total === 0) {
         return { headline: "Nothing to watch.", subline: "The ping-agent isn't checking any targets yet." };
       }
-      const stale = targets.filter((t) => t.stale);
+      const stale = names((t) => t.stale);
       if (stale.length) {
         return {
           headline: "Hold on…",
-          subline: `No fresh checks for ${list(stale.map((t) => t.name))}. The ping-agent may be stuck or overloaded.`,
+          subline: `No fresh checks for ${listNames(stale)}. The ping-agent may be stuck or overloaded.`,
         };
       }
       return { headline: "Hold on…", subline: `Waiting for the first check of ${plural(summary.unknown, "target")}.` };
@@ -355,11 +368,9 @@ function renderMaintenance() {
     return;
   }
   const items = windows.map((w) => {
-    const who = w.targets.length <= 3 ? w.targets.join(", ") : `${w.targets.slice(0, 3).join(", ")} and ${plural(w.targets.length - 3, "other")}`;
-    const multiDay = Math.abs(secondsSince(w.ends_at) - secondsSince(w.starts_at)) >= 86400 || !w.active;
-    const when = w.active
-      ? `until ${fmtWhen(w.ends_at, multiDay)}`
-      : `${fmtWhen(w.starts_at, true)} – ${fmtWhen(w.ends_at, multiDay && secondsSince(w.ends_at) < -86400)}`;
+    const who = listNames(w.targets, 3);
+    const spansDays = new Date(w.ends_at) - new Date(w.starts_at) >= 86400_000;
+    const when = w.active ? `until ${fmtUntil(w.ends_at)}` : `${fmtWhen(w.starts_at, true)} – ${fmtWhen(w.ends_at, spansDays)}`;
     return el(
       "li",
       { class: w.active ? "maint-item is-active" : "maint-item" },
@@ -376,9 +387,11 @@ function renderBanner() {
   const staleData = state.status && state.statusError;
   document.body.classList.toggle("is-stale", Boolean(staleData));
   if (staleData) {
-    banner.textContent = `Couldn't refresh: ${describeError(state.statusError)}. Showing what we knew ${fmtAgo(
-      (Date.now() - state.statusAt) / 1000,
-    )}.`;
+    // The banner is an alert: keep its text stable between renders, or
+    // screen readers announce it again every time it is rewritten.
+    const at = fmtWhen(new Date(state.statusAt).toISOString(), Date.now() - state.statusAt > 86400_000);
+    const text = `Couldn't refresh: ${describeError(state.statusError)}. Showing what we knew at ${at}.`;
+    if (banner.textContent !== text) banner.textContent = text;
     banner.hidden = false;
   } else {
     banner.hidden = true;
@@ -397,11 +410,10 @@ function renderFreshness() {
 
 // ---------- rendering: targets ----------
 
-function historyProblem() {
-  const error = state.historyError;
+function historyProblem(error, subject) {
   if (!error) return null;
-  if (error.status === 501) return "History needs Prometheus: PROMETHEUS_URL isn't set on the gateway.";
-  return "History is unavailable right now: the history store isn't answering. Current status is unaffected.";
+  if (error.status === 501) return `${subject} needs Prometheus: PROMETHEUS_URL isn't set on the gateway.`;
+  return `${subject} is unavailable right now: the history store isn't answering.`;
 }
 
 function renderTargets() {
@@ -421,8 +433,8 @@ function renderTargets() {
   list.querySelectorAll(":scope > .target--skeleton, :scope > li.history-empty").forEach((node) => node.remove());
 
   const note = $("history-note");
-  const problem = historyProblem();
-  note.textContent = problem || "";
+  const problem = historyProblem(state.historyError, "History");
+  note.textContent = problem ? `${problem} Current status is unaffected.` : "";
   note.hidden = !problem;
 
   const historyByUrl = new Map((state.history?.targets || []).map((row) => [row.url, row]));
@@ -455,6 +467,7 @@ function renderTargets() {
     if (!seen.has(url)) {
       refs.li.remove();
       state.rows.delete(url);
+      state.previous.delete(url);
     }
   }
 }
@@ -505,7 +518,7 @@ function pill(target) {
 
 function updateRow(refs, target, history) {
   const p = pill(target);
-  refs.li.dataset.state = p.kind === "slow" ? "slow" : p.kind === "maintenance" ? "maintenance" : target.state;
+  refs.li.dataset.state = p.kind;
   refs.pill.className = `pill pill--${p.kind}`;
   refs.pill.replaceChildren(icon(p.kind), document.createTextNode(p.text));
   refs.name.textContent = target.name;
@@ -563,8 +576,7 @@ function renderSummary(summary, target) {
   // An outage that began before the window has lasted longer than we can see.
   const lasted = since ? `${beforeWindow ? "over " : ""}${fmtDuration(secondsSince(since))}` : null;
   if (target.maintenance?.active) {
-    const until = fmtWhen(target.maintenance.ends_at, secondsSince(target.maintenance.ends_at) < -86400);
-    parts.push(el("span", { class: "maint", text: `Planned maintenance until ${until}` }));
+    parts.push(el("span", { class: "maint", text: `Planned maintenance until ${fmtUntil(target.maintenance.ends_at)}` }));
     if (target.maintenance.comment) parts.push(target.maintenance.comment);
   }
   if (target.state === "up") {
@@ -620,9 +632,9 @@ function budgetDetail(target) {
   const used = fmtDuration(row.downtime_seconds);
   const allowed = fmtDuration(row.allowed_downtime_seconds);
   const text = left >= 0 ? `${Math.round(left)}% left · ${used} of ${allowed} used` : `Overspent · ${used} down, ${allowed} allowed`;
-  const coverage = row.coverage_seconds < 30 * 86400 ? ` (based on ${fmtDuration(row.coverage_seconds)} of data)` : "";
+  const coverage = row.coverage_seconds < SLO_WINDOW_DAYS * 86400 ? ` (based on ${fmtDuration(row.coverage_seconds)} of data)` : "";
   const value = el("span", { class: left < 0 ? "reason" : left < 25 ? "slowtext" : "", text: text + coverage });
-  return detail(`Error budget, 30 days at ${row.objective}%`, value);
+  return detail(`Error budget, ${SLO_WINDOW_DAYS} days at ${row.objective}%`, value);
 }
 
 function renderDetails(body, target) {
@@ -755,7 +767,6 @@ function renderHistory(refs, target, history) {
 function showTip(bar) {
   const tip = $("tooltip");
   tip.textContent = bar.dataset.tip || "";
-  tip.style.whiteSpace = "pre-line";
   tip.hidden = false;
   const rect = bar.getBoundingClientRect();
   const width = tip.offsetWidth;
@@ -811,12 +822,7 @@ function renderOutages() {
     : "";
 
   if (!data) {
-    const error = state.outagesError;
-    const text = !error
-      ? "Loading outage history…"
-      : error.status === 501
-        ? "Outage history needs Prometheus: PROMETHEUS_URL isn't set on the gateway."
-        : "Outage history is unavailable right now: the history store isn't answering.";
+    const text = historyProblem(state.outagesError, "Outage history") || "Loading outage history…";
     container.replaceChildren(el("p", { class: "empty", text }));
     return;
   }
@@ -885,7 +891,7 @@ function render() {
 }
 
 function selectWindow(next) {
-  if (!(next in WINDOWS) || next === state.window) return;
+  if (!Object.hasOwn(WINDOWS, next) || next === state.window) return;
   state.window = next;
   try {
     localStorage.setItem("iyup.window", next);
@@ -901,7 +907,7 @@ function selectWindow(next) {
   state.historyError = null;
   state.outagesError = null;
   render();
-  refreshHistory().then(schedule);
+  refreshHistory().then(scheduleHistory);
 }
 
 function syncWindowButtons() {
