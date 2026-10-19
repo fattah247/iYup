@@ -54,8 +54,8 @@ alertmanager:
   pvcSize: 1Gi
 
 alert:
-  # Every alert goes to the in-cluster alert-logger. Email and Slack receivers
-  # are added only when configured; put real values in a git-ignored values file.
+  # Every alert goes to the in-cluster alert-logger. Each receiver below is
+  # added only when configured; put real values in a git-ignored values file.
   smtp:
     smarthost: "" # e.g. smtp.gmail.com:587
     from: ""
@@ -74,4 +74,4 @@ alert:
 
 ingress:
   enabled: false
-  host: uptimpulse.local
+  host: iyup.local

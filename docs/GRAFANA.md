@@ -50,9 +50,3 @@ python3 scripts/check_dashboard_queries.py http://localhost:9090
 ```
 
 Each query reports `OK` with its series count, `EMPTY`, or `ERROR` with the expanded query. Some panels are legitimately empty, for example "Retries per hour" when nothing needed a retry, or "Domain registration days left" when the targets file lists no domains. The script reads the queries from the dashboard file itself, so it cannot drift from what Grafana runs.
-
-For a broader data-quality pass:
-
-```bash
-python3 scripts/validate_prometheus_data.py http://localhost:9090
-```

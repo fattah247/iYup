@@ -36,7 +36,7 @@ var (
 	pingLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "ping_latency_seconds",
-			Help:    "Response latency of checks that received an HTTP response, in seconds",
+			Help:    "Response latency of checks that got a response (HTTP reply, TCP connect or DNS answer), in seconds",
 			Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 5, 10},
 		},
 		[]string{"target"},
@@ -51,7 +51,7 @@ var (
 	pingLastLatency = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ping_last_latency_seconds",
-			Help: "Latency of the most recent check; absent when it received no HTTP response",
+			Help: "Latency of the most recent check; absent when it got no response",
 		},
 		[]string{"target"},
 	)
@@ -206,91 +206,91 @@ func newRecorder() *recorder {
 	return &recorder{state: map[string]targetState{}}
 }
 
-func (r *recorder) record(target string, res checkResult, now time.Time) {
+func (r *recorder) record(id string, res checkResult, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if res.Responded {
-		pingLatency.WithLabelValues(target).Observe(res.Latency.Seconds())
-		pingLastLatency.WithLabelValues(target).Set(res.Latency.Seconds())
+		pingLatency.WithLabelValues(id).Observe(res.Latency.Seconds())
+		pingLastLatency.WithLabelValues(id).Set(res.Latency.Seconds())
 	} else {
 		// No response means no response time; keeping the previous value would
 		// make a dead target look fast.
-		pingLastLatency.DeleteLabelValues(target)
+		pingLastLatency.DeleteLabelValues(id)
 	}
 	if res.StatusCode > 0 {
-		pingLastStatusCode.WithLabelValues(target).Set(float64(res.StatusCode))
+		pingLastStatusCode.WithLabelValues(id).Set(float64(res.StatusCode))
 	} else {
-		pingLastStatusCode.DeleteLabelValues(target)
+		pingLastStatusCode.DeleteLabelValues(id)
 	}
 	if res.Degraded {
-		pingDegraded.WithLabelValues(target).Set(1)
+		pingDegraded.WithLabelValues(id).Set(1)
 	} else {
-		pingDegraded.WithLabelValues(target).Set(0)
+		pingDegraded.WithLabelValues(id).Set(0)
 	}
-	setOrDelete(pingDNSDuration, target, res.Timings.DNS)
-	setOrDelete(pingConnectDuration, target, res.Timings.Connect)
-	setOrDelete(pingTLSDuration, target, res.Timings.TLS)
+	setOrDelete(pingDNSDuration, id, res.Timings.DNS)
+	setOrDelete(pingConnectDuration, id, res.Timings.Connect)
+	setOrDelete(pingTLSDuration, id, res.Timings.TLS)
 	if !res.CertExpiry.IsZero() {
-		pingSSLCertExpiry.WithLabelValues(target).Set(res.CertExpiry.Sub(now).Hours() / 24)
+		pingSSLCertExpiry.WithLabelValues(id).Set(res.CertExpiry.Sub(now).Hours() / 24)
 	}
 	if res.Attempts > 1 {
-		pingRetries.WithLabelValues(target).Add(float64(res.Attempts - 1))
+		pingRetries.WithLabelValues(id).Add(float64(res.Attempts - 1))
 	}
 
-	prev, seen := r.state[target]
+	prev, seen := r.state[id]
 	if seen && prev.reason != res.Reason {
-		pingLastResult.DeleteLabelValues(target, prev.reason)
+		pingLastResult.DeleteLabelValues(id, prev.reason)
 	}
-	pingLastResult.WithLabelValues(target, res.Reason).Set(1)
+	pingLastResult.WithLabelValues(id, res.Reason).Set(1)
 
 	if res.Up {
-		pingSuccess.WithLabelValues(target).Inc()
-		pingUp.WithLabelValues(target).Set(1)
+		pingSuccess.WithLabelValues(id).Inc()
+		pingUp.WithLabelValues(id).Set(1)
 	} else {
-		pingFailure.WithLabelValues(target).Inc()
-		pingUp.WithLabelValues(target).Set(0)
+		pingFailure.WithLabelValues(id).Inc()
+		pingUp.WithLabelValues(id).Set(0)
 	}
-	pingLastCheck.WithLabelValues(target).Set(unixSeconds(now))
+	pingLastCheck.WithLabelValues(id).Set(unixSeconds(now))
 
 	next := targetState{up: res.Up, reason: res.Reason, since: prev.since}
 	if !seen || prev.up != res.Up {
 		next.since = now
-		pingStateChange.WithLabelValues(target).Set(unixSeconds(now))
+		pingStateChange.WithLabelValues(id).Set(unixSeconds(now))
 	}
-	r.state[target] = next
+	r.state[id] = next
 
-	logResult(target, res, prev, seen, now)
+	logResult(id, res, prev, seen, now)
 }
 
-func logResult(target string, res checkResult, prev targetState, seen bool, now time.Time) {
+func logResult(id string, res checkResult, prev targetState, seen bool, now time.Time) {
 	latency := res.Latency.Truncate(time.Millisecond)
 	switch {
 	case seen && prev.up && !res.Up:
-		log.Printf("[OUTAGE] %s went down reason=%s attempts=%d %s", target, res.Reason, res.Attempts, describeFailure(res))
+		log.Printf("[OUTAGE] %s went down reason=%s attempts=%d %s", id, res.Reason, res.Attempts, describeFailure(res))
 	case seen && !prev.up && res.Up:
 		log.Printf("[RECOVERED] %s is back up after %v down, status=%d latency=%v",
-			target, now.Sub(prev.since).Truncate(time.Second), res.StatusCode, latency)
+			id, now.Sub(prev.since).Truncate(time.Second), res.StatusCode, latency)
 	case res.Up && res.Degraded:
 		log.Printf("[SLOW] %s latency=%v is above its degraded_after threshold, status=%d attempts=%d",
-			target, latency, res.StatusCode, res.Attempts)
+			id, latency, res.StatusCode, res.Attempts)
 	case res.Up:
 		log.Printf("[UP] %s status=%d latency=%v dns=%v tcp=%v tls=%v attempts=%d",
-			target, res.StatusCode, latency,
+			id, res.StatusCode, latency,
 			res.Timings.DNS.Truncate(time.Microsecond),
 			res.Timings.Connect.Truncate(time.Microsecond),
 			res.Timings.TLS.Truncate(time.Microsecond),
 			res.Attempts)
 	default:
-		log.Printf("[DOWN] %s reason=%s attempts=%d %s", target, res.Reason, res.Attempts, describeFailure(res))
+		log.Printf("[DOWN] %s reason=%s attempts=%d %s", id, res.Reason, res.Attempts, describeFailure(res))
 	}
 }
 
-func setOrDelete(vec *prometheus.GaugeVec, target string, d time.Duration) {
+func setOrDelete(vec *prometheus.GaugeVec, id string, d time.Duration) {
 	if d > 0 {
-		vec.WithLabelValues(target).Set(d.Seconds())
+		vec.WithLabelValues(id).Set(d.Seconds())
 	} else {
-		vec.DeleteLabelValues(target)
+		vec.DeleteLabelValues(id)
 	}
 }
 

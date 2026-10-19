@@ -254,10 +254,7 @@ a {
   transition: opacity 200ms ease, fill 300ms ease;
 }
 
-.critter__body {
-  fill: var(--body);
-}
-
+.critter__body,
 .critter__beacon {
   fill: var(--body);
 }
@@ -474,7 +471,8 @@ a {
   white-space: nowrap;
 }
 
-.pill svg {
+.pill svg,
+.region svg {
   width: 14px;
   height: 14px;
   fill: none;
@@ -517,16 +515,6 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-}
-
-.region svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .region--up svg { color: var(--up-ink); }
@@ -856,6 +844,7 @@ a {
   color: var(--paper);
   font-size: 13px;
   line-height: 1.35;
+  white-space: pre-line;
   pointer-events: none;
   box-shadow: 0 8px 22px -10px rgba(0, 0, 0, 0.5);
 }

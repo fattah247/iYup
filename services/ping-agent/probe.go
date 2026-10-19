@@ -4,25 +4,26 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
+const agentName = "iyup-ping-agent/2"
+
 // userAgent identifies the agent (and its region) to the sites it checks.
-var userAgent = "iyup-ping-agent/2"
+var userAgent = agentName
 
 func setUserAgent(region string) {
 	if region != "" {
-		userAgent = "iyup-ping-agent/2 (region=" + region + ")"
+		userAgent = agentName + " (region=" + region + ")"
 	}
 }
 
@@ -42,17 +43,30 @@ const (
 	reasonError             = "error"
 )
 
-var allReasons = []string{
-	reasonOK, reasonHTTP4xx, reasonHTTP5xx, reasonUnexpectedStatus, reasonBodyMismatch,
-	reasonUnexpectedAnswer, reasonTimeout, reasonDNS, reasonConnectionRefused, reasonTLS,
-	reasonNetwork, reasonError,
-}
-
 // retryable reasons are the ones a second attempt might change. A 404, a
 // rejected certificate or a wrong DNS answer will be just as wrong in a second.
 var retryable = map[string]bool{
 	reasonHTTP5xx: true, reasonBodyMismatch: true, reasonTimeout: true, reasonDNS: true,
 	reasonConnectionRefused: true, reasonNetwork: true, reasonError: true,
+}
+
+const maxBackoff = 5 * time.Second
+
+// backoffBase is the pause before the first retry; it doubles per retry.
+var backoffBase = 500 * time.Millisecond
+
+// backoffBefore returns the pause before retry number n (1-based).
+func backoffBefore(n int) time.Duration {
+	return doubling(backoffBase, maxBackoff, n)
+}
+
+// doubling is base for n = 1, doubling with each n, capped at limit.
+func doubling(base, limit time.Duration, n int) time.Duration {
+	d := base << (n - 1)
+	if d <= 0 || d > limit {
+		return limit
+	}
+	return d
 }
 
 // check is a target plus what it needs at runtime.
@@ -132,9 +146,7 @@ func httpAttempt(ctx context.Context, client *http.Client, t target) checkResult
 	if err != nil {
 		return checkResult{Reason: reasonError, Err: err}
 	}
-	for name, values := range t.Headers {
-		req.Header[name] = values
-	}
+	req.Header = t.Headers.Clone()
 	req.Header.Set("User-Agent", userAgent)
 	if t.UseRange {
 		req.Header.Set("Range", "bytes=0-0")
@@ -149,10 +161,9 @@ func httpAttempt(ctx context.Context, client *http.Client, t target) checkResult
 		return res
 	}
 	var body []byte
+	var bodyErr error
 	if t.BodyContains != "" {
-		body, _ = io.ReadAll(io.LimitReader(resp.Body, t.MaxBodyBytes))
-	} else if t.MaxBodyBytes > 0 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, t.MaxBodyBytes))
+		body, bodyErr = io.ReadAll(io.LimitReader(resp.Body, t.MaxBodyBytes))
 	}
 	_ = resp.Body.Close()
 
@@ -161,7 +172,13 @@ func httpAttempt(ctx context.Context, client *http.Client, t target) checkResult
 		res.CertExpiry = resp.TLS.PeerCertificates[0].NotAfter
 	}
 	res.Up, res.Reason = evaluateStatus(t, resp.StatusCode)
-	if res.Up && t.BodyContains != "" && !bytes.Contains(body, []byte(t.BodyContains)) {
+	switch {
+	case !res.Up || t.BodyContains == "":
+	case bodyErr != nil:
+		// A body that stalls or breaks off is a transport failure, not proof
+		// that the page lacks the expected text.
+		res.Up, res.Reason, res.Err = false, classifyError(bodyErr), bodyErr
+	case !bytes.Contains(body, []byte(t.BodyContains)):
 		res.Up, res.Reason = false, reasonBodyMismatch
 	}
 	return res
@@ -173,16 +190,13 @@ func evaluateStatus(t target, code int) (bool, string) {
 	if len(t.ExpectStatus) == 0 {
 		return classifyStatus(code, t.UseRange)
 	}
-	switch {
-	case statusExpected(code, t.ExpectStatus):
+	if statusExpected(code, t.ExpectStatus) {
 		return true, reasonOK
-	case code >= http.StatusInternalServerError:
-		return false, reasonHTTP5xx
-	case code >= http.StatusBadRequest:
-		return false, reasonHTTP4xx
-	default:
-		return false, reasonUnexpectedStatus
 	}
+	if up, reason := classifyStatus(code, false); !up {
+		return false, reason
+	}
+	return false, reasonUnexpectedStatus
 }
 
 func classifyStatus(code int, sentRange bool) (up bool, reason string) {
@@ -201,10 +215,11 @@ func classifyStatus(code int, sentRange bool) (up bool, reason string) {
 
 func classifyError(err error) string {
 	var dnsErr *net.DNSError
+	// Since Go 1.20 every chain or hostname failure arrives wrapped in a
+	// CertificateVerificationError; an AlertError is the server refusing the
+	// handshake.
 	var certErr *tls.CertificateVerificationError
-	var unknownAuthority x509.UnknownAuthorityError
-	var hostnameErr x509.HostnameError
-	var invalidCert x509.CertificateInvalidError
+	var alertErr tls.AlertError
 	var recordErr tls.RecordHeaderError
 	var netErr net.Error
 	var opErr *net.OpError
@@ -212,8 +227,7 @@ func classifyError(err error) string {
 	switch {
 	case errors.As(err, &dnsErr):
 		return reasonDNS
-	case errors.As(err, &certErr), errors.As(err, &unknownAuthority),
-		errors.As(err, &hostnameErr), errors.As(err, &invalidCert), errors.As(err, &recordErr):
+	case errors.As(err, &certErr), errors.As(err, &alertErr), errors.As(err, &recordErr):
 		return reasonTLS
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return reasonConnectionRefused
@@ -241,7 +255,7 @@ func describeFailure(res checkResult) string {
 		return "err=" + res.Err.Error()
 	}
 	if res.StatusCode > 0 {
-		return "status=" + strings.TrimSpace(http.StatusText(res.StatusCode))
+		return fmt.Sprintf("status=%d", res.StatusCode)
 	}
 	return ""
 }
