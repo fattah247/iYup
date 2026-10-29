@@ -170,3 +170,7 @@ How each one is captured is in [docs/SCREENSHOT_GUIDE.md](docs/SCREENSHOT_GUIDE.
 - [docs/SCREENSHOT_GUIDE.md](docs/SCREENSHOT_GUIDE.md)
 - [docs/PORTFOLIO_PROOF_CHECKLIST.md](docs/PORTFOLIO_PROOF_CHECKLIST.md)
 - [docs/PHASE_0_VERIFICATION.md](docs/PHASE_0_VERIFICATION.md)
+
+## License
+
+MIT. See [LICENSE](LICENSE).
